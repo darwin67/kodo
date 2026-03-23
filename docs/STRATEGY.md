@@ -304,13 +304,13 @@ Tables:
 
 Get a working chat loop: user types a message, Anthropic responds with streaming.
 
-- [ ] Set up Cargo workspace with all crate stubs
-- [ ] Define core message types (`Message`, `Role`, `ContentBlock`, `ToolCall`, `ToolResult`)
-- [ ] Define `Provider` trait in `kodo-llm` with `complete()` and `stream()`
-- [ ] Implement Anthropic provider with streaming (SSE parsing)
-- [ ] Basic terminal I/O (readline-style input, print streamed tokens)
-- [ ] Wire up agentic loop: user input -> build messages -> send to LLM -> stream response
-- [ ] Auth via `ANTHROPIC_API_KEY` env var
+- [x] Set up Cargo workspace with all crate stubs
+- [x] Define core message types (`Message`, `Role`, `ContentBlock`, `ToolCall`, `ToolResult`)
+- [x] Define `Provider` trait in `kodo-llm` with `complete()` and `stream()`
+- [x] Implement Anthropic provider with streaming (SSE parsing)
+- [x] Basic terminal I/O (readline-style input, print streamed tokens)
+- [x] Wire up agentic loop: user input -> build messages -> send to LLM -> stream response
+- [x] Auth via `ANTHROPIC_API_KEY` env var
 
 ### Phase 2 — Tool System & Formatters
 
