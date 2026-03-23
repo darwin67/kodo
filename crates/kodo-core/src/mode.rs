@@ -23,3 +23,43 @@ impl Default for Mode {
         Self::Build
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_mode_is_build() {
+        assert_eq!(Mode::default(), Mode::Build);
+    }
+
+    #[test]
+    fn mode_display_plan() {
+        assert_eq!(Mode::Plan.to_string(), "plan");
+    }
+
+    #[test]
+    fn mode_display_build() {
+        assert_eq!(Mode::Build.to_string(), "build");
+    }
+
+    #[test]
+    fn mode_equality() {
+        assert_eq!(Mode::Plan, Mode::Plan);
+        assert_eq!(Mode::Build, Mode::Build);
+        assert_ne!(Mode::Plan, Mode::Build);
+    }
+
+    #[test]
+    fn mode_clone() {
+        let mode = Mode::Plan;
+        let cloned = mode;
+        assert_eq!(mode, cloned);
+    }
+
+    #[test]
+    fn mode_debug() {
+        assert_eq!(format!("{:?}", Mode::Plan), "Plan");
+        assert_eq!(format!("{:?}", Mode::Build), "Build");
+    }
+}

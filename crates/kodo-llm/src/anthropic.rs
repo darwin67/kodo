@@ -472,3 +472,486 @@ impl Provider for AnthropicProvider {
         ])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // parse_stop_reason
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_stop_reason_end_turn() {
+        assert_eq!(parse_stop_reason(Some("end_turn")), StopReason::EndTurn);
+    }
+
+    #[test]
+    fn parse_stop_reason_tool_use() {
+        assert_eq!(parse_stop_reason(Some("tool_use")), StopReason::ToolUse);
+    }
+
+    #[test]
+    fn parse_stop_reason_max_tokens() {
+        assert_eq!(parse_stop_reason(Some("max_tokens")), StopReason::MaxTokens);
+    }
+
+    #[test]
+    fn parse_stop_reason_none_defaults_to_end_turn() {
+        assert_eq!(parse_stop_reason(None), StopReason::EndTurn);
+    }
+
+    #[test]
+    fn parse_stop_reason_unknown_defaults_to_end_turn() {
+        assert_eq!(parse_stop_reason(Some("unknown")), StopReason::EndTurn);
+    }
+
+    // -----------------------------------------------------------------------
+    // to_api_content_block / from_api_content_block roundtrip
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn content_block_text_roundtrip() {
+        let original = ContentBlock::text("hello");
+        let api = to_api_content_block(&original);
+        let back = from_api_content_block(&api);
+        assert_eq!(back.as_text(), Some("hello"));
+    }
+
+    #[test]
+    fn content_block_tool_use_roundtrip() {
+        let input = serde_json::json!({"path": "/tmp/file.txt"});
+        let original = ContentBlock::tool_use("tu-123", "file_read", input.clone());
+        let api = to_api_content_block(&original);
+        let back = from_api_content_block(&api);
+        match back {
+            ContentBlock::ToolUse { id, name, input: i } => {
+                assert_eq!(id, "tu-123");
+                assert_eq!(name, "file_read");
+                assert_eq!(i, input);
+            }
+            _ => panic!("expected ToolUse"),
+        }
+    }
+
+    #[test]
+    fn content_block_tool_result_roundtrip() {
+        let original = ContentBlock::tool_result("tu-123", "file contents here", false);
+        let api = to_api_content_block(&original);
+        let back = from_api_content_block(&api);
+        match back {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                assert_eq!(tool_use_id, "tu-123");
+                assert_eq!(content, "file contents here");
+                assert_eq!(is_error, None);
+            }
+            _ => panic!("expected ToolResult"),
+        }
+    }
+
+    #[test]
+    fn content_block_tool_result_error_roundtrip() {
+        let original = ContentBlock::tool_result("tu-456", "error msg", true);
+        let api = to_api_content_block(&original);
+        let back = from_api_content_block(&api);
+        match back {
+            ContentBlock::ToolResult { is_error, .. } => {
+                assert_eq!(is_error, Some(true));
+            }
+            _ => panic!("expected ToolResult"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // to_api_messages
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn to_api_messages_user() {
+        let msgs = vec![Message::user("hello")];
+        let api_msgs = to_api_messages(&msgs);
+        assert_eq!(api_msgs.len(), 1);
+        assert_eq!(api_msgs[0].role, "user");
+        assert_eq!(api_msgs[0].content.len(), 1);
+    }
+
+    #[test]
+    fn to_api_messages_assistant() {
+        let msgs = vec![Message::assistant("hi there")];
+        let api_msgs = to_api_messages(&msgs);
+        assert_eq!(api_msgs[0].role, "assistant");
+    }
+
+    #[test]
+    fn to_api_messages_preserves_order() {
+        let msgs = vec![
+            Message::user("first"),
+            Message::assistant("second"),
+            Message::user("third"),
+        ];
+        let api_msgs = to_api_messages(&msgs);
+        assert_eq!(api_msgs.len(), 3);
+        assert_eq!(api_msgs[0].role, "user");
+        assert_eq!(api_msgs[1].role, "assistant");
+        assert_eq!(api_msgs[2].role, "user");
+    }
+
+    // -----------------------------------------------------------------------
+    // to_api_tools
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn to_api_tools_converts_correctly() {
+        let tools = vec![ToolDefinition {
+            name: "file_read".into(),
+            description: "Read a file".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" }
+                }
+            }),
+        }];
+        let api_tools = to_api_tools(&tools);
+        assert_eq!(api_tools.len(), 1);
+        assert_eq!(api_tools[0].name, "file_read");
+        assert_eq!(api_tools[0].description, "Read a file");
+    }
+
+    #[test]
+    fn to_api_tools_empty() {
+        let api_tools = to_api_tools(&[]);
+        assert!(api_tools.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // build_api_request
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn build_api_request_non_streaming() {
+        let provider = AnthropicProvider::new("test-key".into());
+        let request = CompletionRequest {
+            model: "claude-sonnet-4-20250514".into(),
+            system: Some("You are helpful.".into()),
+            messages: vec![Message::user("hello")],
+            tools: vec![],
+            max_tokens: 1024,
+        };
+        let api_req = provider.build_api_request(&request, false);
+        assert_eq!(api_req.model, "claude-sonnet-4-20250514");
+        assert_eq!(api_req.max_tokens, 1024);
+        assert!(!api_req.stream);
+        assert_eq!(api_req.system, Some("You are helpful.".into()));
+        assert_eq!(api_req.messages.len(), 1);
+        assert!(api_req.tools.is_empty());
+    }
+
+    #[test]
+    fn build_api_request_streaming() {
+        let provider = AnthropicProvider::new("test-key".into());
+        let request = CompletionRequest {
+            model: "claude-sonnet-4-20250514".into(),
+            system: None,
+            messages: vec![],
+            tools: vec![],
+            max_tokens: 4096,
+        };
+        let api_req = provider.build_api_request(&request, true);
+        assert!(api_req.stream);
+        assert_eq!(api_req.system, None);
+    }
+
+    #[test]
+    fn build_api_request_serialization() {
+        let provider = AnthropicProvider::new("test-key".into());
+        let request = CompletionRequest {
+            model: "claude-sonnet-4-20250514".into(),
+            system: Some("system".into()),
+            messages: vec![Message::user("hi")],
+            tools: vec![ToolDefinition {
+                name: "test".into(),
+                description: "test tool".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+            max_tokens: 1024,
+        };
+        let api_req = provider.build_api_request(&request, false);
+        // Should serialize without error
+        let json = serde_json::to_string(&api_req).unwrap();
+        assert!(json.contains("claude-sonnet-4-20250514"));
+        assert!(json.contains(r#""stream":false"#));
+    }
+
+    #[test]
+    fn build_api_request_omits_system_when_none() {
+        let provider = AnthropicProvider::new("test-key".into());
+        let request = CompletionRequest {
+            model: "test".into(),
+            system: None,
+            messages: vec![],
+            tools: vec![],
+            max_tokens: 1024,
+        };
+        let api_req = provider.build_api_request(&request, false);
+        let json = serde_json::to_string(&api_req).unwrap();
+        // system should be absent when None
+        assert!(!json.contains("system"));
+    }
+
+    #[test]
+    fn build_api_request_omits_tools_when_empty() {
+        let provider = AnthropicProvider::new("test-key".into());
+        let request = CompletionRequest {
+            model: "test".into(),
+            system: None,
+            messages: vec![],
+            tools: vec![],
+            max_tokens: 1024,
+        };
+        let api_req = provider.build_api_request(&request, false);
+        let json = serde_json::to_string(&api_req).unwrap();
+        // tools should be absent when empty
+        assert!(!json.contains("tools"));
+    }
+
+    // -----------------------------------------------------------------------
+    // SSE data deserialization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sse_message_start_deserialization() {
+        let data =
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":25,"output_tokens":0}}}"#;
+        let sse: SseData = serde_json::from_str(data).unwrap();
+        match sse {
+            SseData::MessageStart { message } => {
+                assert_eq!(message.usage.input_tokens, 25);
+                assert_eq!(message.usage.output_tokens, 0);
+            }
+            _ => panic!("expected MessageStart"),
+        }
+    }
+
+    #[test]
+    fn sse_content_block_start_text_deserialization() {
+        let data =
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#;
+        let sse: SseData = serde_json::from_str(data).unwrap();
+        match sse {
+            SseData::ContentBlockStart {
+                index,
+                content_block,
+            } => {
+                assert_eq!(index, 0);
+                match content_block {
+                    ApiContentBlock::Text { text } => assert_eq!(text, ""),
+                    _ => panic!("expected Text block"),
+                }
+            }
+            _ => panic!("expected ContentBlockStart"),
+        }
+    }
+
+    #[test]
+    fn sse_content_block_start_tool_use_deserialization() {
+        let data = r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu_123","name":"file_read","input":{}}}"#;
+        let sse: SseData = serde_json::from_str(data).unwrap();
+        match sse {
+            SseData::ContentBlockStart {
+                content_block: ApiContentBlock::ToolUse { id, name, .. },
+                ..
+            } => {
+                assert_eq!(id, "tu_123");
+                assert_eq!(name, "file_read");
+            }
+            _ => panic!("expected ContentBlockStart with ToolUse"),
+        }
+    }
+
+    #[test]
+    fn sse_text_delta_deserialization() {
+        let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
+        let sse: SseData = serde_json::from_str(data).unwrap();
+        match sse {
+            SseData::ContentBlockDelta {
+                delta: SseDelta::TextDelta { text },
+                ..
+            } => {
+                assert_eq!(text, "Hello");
+            }
+            _ => panic!("expected ContentBlockDelta with TextDelta"),
+        }
+    }
+
+    #[test]
+    fn sse_input_json_delta_deserialization() {
+        let data = r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":"}}"#;
+        let sse: SseData = serde_json::from_str(data).unwrap();
+        match sse {
+            SseData::ContentBlockDelta {
+                delta: SseDelta::InputJsonDelta { partial_json },
+                ..
+            } => {
+                assert_eq!(partial_json, r#"{"path":"#);
+            }
+            _ => panic!("expected ContentBlockDelta with InputJsonDelta"),
+        }
+    }
+
+    #[test]
+    fn sse_content_block_stop_deserialization() {
+        let data = r#"{"type":"content_block_stop","index":0}"#;
+        let sse: SseData = serde_json::from_str(data).unwrap();
+        assert!(matches!(sse, SseData::ContentBlockStop { index: 0 }));
+    }
+
+    #[test]
+    fn sse_message_delta_deserialization() {
+        let data = r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":0,"output_tokens":42}}"#;
+        let sse: SseData = serde_json::from_str(data).unwrap();
+        match sse {
+            SseData::MessageDelta { delta, usage } => {
+                assert_eq!(delta.stop_reason.as_deref(), Some("end_turn"));
+                assert_eq!(usage.output_tokens, 42);
+            }
+            _ => panic!("expected MessageDelta"),
+        }
+    }
+
+    #[test]
+    fn sse_message_delta_tool_use_stop_reason() {
+        let data = r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"input_tokens":0,"output_tokens":10}}"#;
+        let sse: SseData = serde_json::from_str(data).unwrap();
+        match sse {
+            SseData::MessageDelta { delta, .. } => {
+                assert_eq!(
+                    parse_stop_reason(delta.stop_reason.as_deref()),
+                    StopReason::ToolUse
+                );
+            }
+            _ => panic!("expected MessageDelta"),
+        }
+    }
+
+    #[test]
+    fn sse_message_stop_deserialization() {
+        let data = r#"{"type":"message_stop"}"#;
+        let sse: SseData = serde_json::from_str(data).unwrap();
+        assert!(matches!(sse, SseData::MessageStop));
+    }
+
+    #[test]
+    fn sse_ping_deserialization() {
+        let data = r#"{"type":"ping"}"#;
+        let sse: SseData = serde_json::from_str(data).unwrap();
+        assert!(matches!(sse, SseData::Ping));
+    }
+
+    #[test]
+    fn sse_error_deserialization() {
+        let data = r#"{"type":"error","error":{"message":"rate limited"}}"#;
+        let sse: SseData = serde_json::from_str(data).unwrap();
+        match sse {
+            SseData::Error { error } => {
+                assert_eq!(error.message, "rate limited");
+            }
+            _ => panic!("expected Error"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // API response deserialization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn api_response_text_deserialization() {
+        let json = r#"{
+            "content": [{"type": "text", "text": "Hello, world!"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        }"#;
+        let resp: ApiResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.content.len(), 1);
+        assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(resp.usage.input_tokens, 10);
+        assert_eq!(resp.usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn api_response_tool_use_deserialization() {
+        let json = r#"{
+            "content": [
+                {"type": "text", "text": "Let me read that file."},
+                {"type": "tool_use", "id": "tu_abc", "name": "file_read", "input": {"path": "/tmp/test.txt"}}
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 50, "output_tokens": 30}
+        }"#;
+        let resp: ApiResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.content.len(), 2);
+        assert_eq!(resp.stop_reason.as_deref(), Some("tool_use"));
+    }
+
+    #[test]
+    fn api_error_deserialization() {
+        let json = r#"{"error": {"message": "Invalid API key"}}"#;
+        let err: ApiError = serde_json::from_str(json).unwrap();
+        assert_eq!(err.error.message, "Invalid API key");
+    }
+
+    // -----------------------------------------------------------------------
+    // Provider metadata
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn provider_name() {
+        let provider = AnthropicProvider::new("test-key".into());
+        assert_eq!(provider.name(), "anthropic");
+    }
+
+    #[test]
+    fn provider_tool_calling_support() {
+        let provider = AnthropicProvider::new("test-key".into());
+        assert_eq!(provider.tool_calling_support(), ToolCallingSupport::Native);
+    }
+
+    #[tokio::test]
+    async fn provider_list_models() {
+        let provider = AnthropicProvider::new("test-key".into());
+        let models = provider.list_models().await.unwrap();
+        assert!(models.len() >= 2);
+        assert!(models.iter().any(|m| m.id.contains("sonnet")));
+        assert!(models.iter().any(|m| m.id.contains("haiku")));
+        assert!(models.iter().all(|m| m.context_window > 0));
+    }
+
+    // -----------------------------------------------------------------------
+    // from_env
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn from_env_fails_without_key() {
+        // Temporarily remove the env var if it exists
+        let original = std::env::var("ANTHROPIC_API_KEY").ok();
+        // SAFETY: This test does not run in parallel with other tests that
+        // read ANTHROPIC_API_KEY. The env var is restored before returning.
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+        }
+
+        let result = AnthropicProvider::from_env();
+        assert!(result.is_err());
+
+        // Restore
+        if let Some(key) = original {
+            unsafe {
+                std::env::set_var("ANTHROPIC_API_KEY", key);
+            }
+        }
+    }
+}

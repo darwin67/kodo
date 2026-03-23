@@ -70,3 +70,147 @@ impl Default for ToolRegistry {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tool::{PermissionLevel, ToolOutput};
+    use std::path::PathBuf;
+
+    /// A dummy tool for testing the registry.
+    struct DummyTool {
+        tool_name: &'static str,
+    }
+
+    impl DummyTool {
+        fn new(name: &'static str) -> Self {
+            Self { tool_name: name }
+        }
+    }
+
+    impl Tool for DummyTool {
+        fn name(&self) -> &str {
+            self.tool_name
+        }
+
+        fn description(&self) -> &str {
+            "A dummy tool for testing"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {}
+            })
+        }
+
+        fn permission_level(&self) -> PermissionLevel {
+            PermissionLevel::Read
+        }
+
+        fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<ToolOutput>> + Send + '_>,
+        > {
+            Box::pin(async {
+                Ok(ToolOutput {
+                    content: format!("executed {}", self.tool_name),
+                    success: true,
+                })
+            })
+        }
+    }
+
+    fn make_ctx() -> ToolContext {
+        ToolContext {
+            working_dir: PathBuf::from("/tmp"),
+        }
+    }
+
+    #[test]
+    fn new_registry_is_empty() {
+        let registry = ToolRegistry::new();
+        assert!(registry.names().is_empty());
+        assert!(registry.tool_definitions().is_empty());
+    }
+
+    #[test]
+    fn default_registry_is_empty() {
+        let registry = ToolRegistry::default();
+        assert!(registry.names().is_empty());
+    }
+
+    #[test]
+    fn register_and_get_tool() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(DummyTool::new("test_tool")));
+
+        assert!(registry.get("test_tool").is_some());
+        assert!(registry.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn register_multiple_tools() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(DummyTool::new("tool_a")));
+        registry.register(Arc::new(DummyTool::new("tool_b")));
+        registry.register(Arc::new(DummyTool::new("tool_c")));
+
+        let mut names = registry.names();
+        names.sort();
+        assert_eq!(names, vec!["tool_a", "tool_b", "tool_c"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "tool already registered: duplicate")]
+    fn register_duplicate_tool_panics() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(DummyTool::new("duplicate")));
+        registry.register(Arc::new(DummyTool::new("duplicate")));
+    }
+
+    #[test]
+    fn tool_definitions_returns_correct_format() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(DummyTool::new("my_tool")));
+
+        let defs = registry.tool_definitions();
+        assert_eq!(defs.len(), 1);
+
+        let def = &defs[0];
+        assert_eq!(def["name"], "my_tool");
+        assert_eq!(def["description"], "A dummy tool for testing");
+        assert!(def["input_schema"].is_object());
+    }
+
+    #[tokio::test]
+    async fn execute_known_tool() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(DummyTool::new("my_tool")));
+
+        let ctx = make_ctx();
+        let result = registry
+            .execute("my_tool", serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.content, "executed my_tool");
+    }
+
+    #[tokio::test]
+    async fn execute_unknown_tool_returns_error() {
+        let registry = ToolRegistry::new();
+        let ctx = make_ctx();
+        let result = registry
+            .execute("nonexistent", serde_json::json!({}), &ctx)
+            .await;
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("unknown tool: nonexistent"));
+    }
+}
