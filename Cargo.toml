@@ -54,7 +54,7 @@ ratatui = "0.29"
 crossterm = "0.28"
 
 # SQLite
-rusqlite = { version = "0.32", features = ["bundled"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 
 # Misc
 uuid = { version = "1", features = ["v4"] }

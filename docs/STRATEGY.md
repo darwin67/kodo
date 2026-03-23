@@ -279,22 +279,22 @@ Tables:
 
 ## Key Dependencies
 
-| Purpose             | Crate                                 |
-|---------------------|---------------------------------------|
-| Async runtime       | `tokio`                               |
-| HTTP client         | `reqwest`                             |
-| Serialization       | `serde`, `serde_json`                 |
-| SQLite              | `rusqlite` or `sqlx` (sqlite feature) |
-| TUI framework       | `ratatui`, `crossterm`                |
-| Streaming           | `tokio-stream`, `futures`             |
-| CLI parsing         | `clap`                                |
-| Error handling      | `anyhow`, `thiserror`                 |
-| Regex / glob        | `regex`, `glob`                       |
-| Syntax highlighting | `syntect`                             |
-| Markdown rendering  | `termimad` or `pulldown-cmark`        |
-| Fuzzy matching      | `nucleo`                              |
-| Logging             | `tracing`, `tracing-subscriber`       |
-| LSP protocol types  | `lsp-types`                           |
+| Purpose             | Crate                              |
+|---------------------|------------------------------------|
+| Async runtime       | `tokio`                            |
+| HTTP client         | `reqwest`                          |
+| Serialization       | `serde`, `serde_json`              |
+| SQLite              | `sqlx` (sqlite + migrate features) |
+| TUI framework       | `ratatui`, `crossterm`             |
+| Streaming           | `tokio-stream`, `futures`          |
+| CLI parsing         | `clap`                             |
+| Error handling      | `anyhow`, `thiserror`              |
+| Regex / glob        | `regex`, `glob`                    |
+| Syntax highlighting | `syntect`                          |
+| Markdown rendering  | `termimad` or `pulldown-cmark`     |
+| Fuzzy matching      | `nucleo`                           |
+| Logging             | `tracing`, `tracing-subscriber`    |
+| LSP protocol types  | `lsp-types`                        |
 
 ---
 
