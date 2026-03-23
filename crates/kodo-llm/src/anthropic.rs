@@ -347,13 +347,12 @@ impl Provider for AnthropicProvider {
                             let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
                             buffer = buffer[newline_pos + 1..].to_string();
 
-                            if line.starts_with("event: ") {
-                                current_event_type = line["event: ".len()..].to_string();
+                            if let Some(stripped) = line.strip_prefix("event: ") {
+                                current_event_type = stripped.to_string();
                                 continue;
                             }
 
-                            if line.starts_with("data: ") {
-                                let data = &line["data: ".len()..];
+                            if let Some(data) = line.strip_prefix("data: ") {
                                 debug!(event_type = %current_event_type, "SSE event");
 
                                 match serde_json::from_str::<SseData>(data) {
