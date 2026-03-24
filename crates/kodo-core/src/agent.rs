@@ -36,7 +36,7 @@ pub struct Agent {
     tool_registry: ToolRegistry,
     messages: Vec<Message>,
     context: ContextTracker,
-    mode: Mode,
+    pub mode: Mode,
     model: String,
     system_prompt: String,
 }
@@ -69,11 +69,6 @@ impl Agent {
     /// Access the tool registry for registering tools.
     pub fn tool_registry_mut(&mut self) -> &mut ToolRegistry {
         &mut self.tool_registry
-    }
-
-    /// Get the current mode.
-    pub fn mode(&self) -> Mode {
-        self.mode
     }
 
     /// Get the context tracker for display purposes.
