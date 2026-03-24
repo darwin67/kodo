@@ -1,6 +1,82 @@
-[package]
-name = "kodo"
+[workspace]
+members = [
+    "crates/kodo-core",
+    "crates/kodo-llm",
+    "crates/kodo-tools",
+    "crates/kodo-tui",
+    "crates/kodo-store",
+    "crates/kodo-lsp",
+    "crates/kodo-fmt",
+]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+# Internal crates
+kodo-core = { path = "crates/kodo-core" }
+kodo-llm = { path = "crates/kodo-llm" }
+kodo-tools = { path = "crates/kodo-tools" }
+kodo-tui = { path = "crates/kodo-tui" }
+kodo-store = { path = "crates/kodo-store" }
+kodo-lsp = { path = "crates/kodo-lsp" }
+kodo-fmt = { path = "crates/kodo-fmt" }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
+
+# HTTP
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# TUI (stubs for now)
+ratatui = "0.29"
+crossterm = "0.28"
+
+# SQLite
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+
+# Misc
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+pin-project-lite = "0.2"
+
+[package]
+name = "kodo"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
+kodo-core = { workspace = true }
+kodo-llm = { workspace = true }
+kodo-tools = { workspace = true }
+kodo-tui = { workspace = true }
+kodo-store = { workspace = true }
+kodo-lsp = { workspace = true }
+kodo-fmt = { workspace = true }
+
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }

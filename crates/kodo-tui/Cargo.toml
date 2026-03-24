@@ -1,0 +1,12 @@
+[package]
+name = "kodo-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kodo-core = { workspace = true }
+kodo-llm = { workspace = true }
+
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
