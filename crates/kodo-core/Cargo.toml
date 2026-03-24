@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 kodo-llm = { workspace = true }
 kodo-tools = { workspace = true }
+kodo-fmt = { workspace = true }
 
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

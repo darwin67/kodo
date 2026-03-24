@@ -1,4 +1,5 @@
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -6,6 +7,8 @@ use anyhow::Result;
 use futures::StreamExt;
 use tracing::debug;
 
+use kodo_fmt::registry::FormatterRegistry;
+use kodo_fmt::runner::format_file;
 use kodo_llm::provider::Provider;
 use kodo_llm::types::{
     CompletionRequest, ContentBlock, Message, Role, StopReason, StreamEvent, ToolDefinition,
@@ -18,6 +21,9 @@ use crate::mode::Mode;
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
 const DEFAULT_MAX_TOKENS: u32 = 8192;
+
+/// Tools that produce file writes, triggering the formatter.
+const FILE_WRITE_TOOLS: &[&str] = &["file_write", "file_edit"];
 
 const SYSTEM_PROMPT: &str = "\
 You are Kodo, a coding assistant that runs in the user's terminal. \
@@ -34,6 +40,7 @@ Be concise and direct. Focus on solving the problem.";
 pub struct Agent {
     provider: Arc<dyn Provider>,
     tool_registry: ToolRegistry,
+    formatter_registry: FormatterRegistry,
     messages: Vec<Message>,
     context: ContextTracker,
     pub mode: Mode,
@@ -46,6 +53,7 @@ impl Agent {
         Self {
             provider,
             tool_registry: ToolRegistry::new(),
+            formatter_registry: FormatterRegistry::with_builtins(),
             messages: Vec::new(),
             context: ContextTracker::new(),
             mode: Mode::default(),
@@ -74,6 +82,11 @@ impl Agent {
     /// Read-only access to the tool registry.
     pub fn tool_registry(&self) -> &ToolRegistry {
         &self.tool_registry
+    }
+
+    /// Access the formatter registry for customization.
+    pub fn formatter_registry_mut(&mut self) -> &mut FormatterRegistry {
+        &mut self.formatter_registry
     }
 
     /// Get the context tracker for display purposes.
@@ -239,6 +252,12 @@ impl Agent {
                 match self.tool_registry.execute(name, input.clone(), &ctx).await {
                     Ok(output) => {
                         debug!(tool = %name, success = output.success, "tool completed");
+
+                        // Run formatter after file write/edit tools.
+                        if output.success && FILE_WRITE_TOOLS.contains(&name.as_str()) {
+                            self.maybe_format_file(name, input).await;
+                        }
+
                         results.push(ContentBlock::tool_result(
                             id,
                             &output.content,
@@ -254,5 +273,29 @@ impl Agent {
         }
 
         Ok(results)
+    }
+
+    /// Attempt to format a file after a write/edit tool has modified it.
+    /// Runs silently — logs to UI but doesn't feed back to LLM.
+    async fn maybe_format_file(&self, tool_name: &str, input: &serde_json::Value) {
+        let path_str = match input.get("path").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => return,
+        };
+
+        let path = PathBuf::from(path_str);
+
+        if let Some(result) = format_file(&self.formatter_registry, &path).await {
+            if result.success {
+                eprintln!("  [fmt: {}]", result.message);
+            } else {
+                debug!(
+                    tool = tool_name,
+                    error = %result.message,
+                    "formatter failed after {}",
+                    tool_name
+                );
+            }
+        }
     }
 }
