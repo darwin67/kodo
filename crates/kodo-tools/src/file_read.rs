@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use tracing::debug;
@@ -109,7 +109,7 @@ impl Tool for FileReadTool {
 
 /// Resolve a path relative to the working directory.
 /// If the path is absolute, return it as-is.
-pub(crate) fn resolve_path(working_dir: &PathBuf, path_str: &str) -> PathBuf {
+pub(crate) fn resolve_path(working_dir: &Path, path_str: &str) -> PathBuf {
     let path = PathBuf::from(path_str);
     if path.is_absolute() {
         path
