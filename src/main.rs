@@ -37,6 +37,9 @@ async fn main() -> Result<()> {
         agent = agent.with_model(model);
     }
 
+    // Register built-in tools.
+    kodo_tools::register_builtin_tools(agent.tool_registry_mut());
+
     println!("kodo v{}", env!("CARGO_PKG_VERSION"));
     println!("Type your message and press Enter. Ctrl+D to exit.\n");
 
