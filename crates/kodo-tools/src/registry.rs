@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
+use tracing::debug;
 
 use crate::tool::{Tool, ToolContext, ToolOutput};
 
@@ -17,11 +18,12 @@ impl ToolRegistry {
         }
     }
 
-    /// Register a tool. Panics if a tool with the same name already exists.
+    /// Register a tool. operation is idempotent
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
         if self.tools.contains_key(&name) {
-            panic!("tool already registered: {name}");
+            debug!("tool already registered: {}", name);
+            return;
         }
         self.tools.insert(name, tool);
     }
@@ -165,11 +167,14 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "tool already registered: duplicate")]
-    fn register_duplicate_tool_panics() {
+    fn register_duplicate_tool_is_idempotent() {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(DummyTool::new("duplicate")));
         registry.register(Arc::new(DummyTool::new("duplicate")));
+
+        // Should have only one tool registered
+        assert_eq!(registry.names().len(), 1);
+        assert!(registry.get("duplicate").is_some());
     }
 
     #[test]
