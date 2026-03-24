@@ -65,6 +65,21 @@ impl ToolRegistry {
     pub fn names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()
     }
+
+    /// Return an iterator over all registered tools.
+    pub fn iter(&self) -> impl Iterator<Item = &Arc<dyn Tool>> {
+        self.tools.values()
+    }
+
+    /// Number of registered tools.
+    pub fn len(&self) -> usize {
+        self.tools.len()
+    }
+
+    /// Whether the registry is empty.
+    pub fn is_empty(&self) -> bool {
+        self.tools.is_empty()
+    }
 }
 
 impl Default for ToolRegistry {

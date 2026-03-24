@@ -52,6 +52,28 @@ async fn main() -> Result<()> {
             break;
         }
 
+        // TODO this will be replaced by modal operations on the TUI/GUI
+        if input == "/tools" {
+            let registry = agent.tool_registry();
+            if registry.is_empty() {
+                println!("No tools registered.");
+            } else {
+                println!("Registered tools ({}):\n", registry.len());
+                let mut tools: Vec<_> = registry.iter().collect();
+                tools.sort_by_key(|t| t.name());
+                for tool in tools {
+                    println!(
+                        "  {:<20} [{:?}]  {}",
+                        tool.name(),
+                        tool.permission_level(),
+                        tool.description()
+                    );
+                }
+            }
+            println!();
+            continue;
+        }
+
         if let Err(e) = agent.process_message(&input).await {
             eprintln!("\nerror: {e:#}");
         }

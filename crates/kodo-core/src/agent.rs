@@ -71,6 +71,11 @@ impl Agent {
         &mut self.tool_registry
     }
 
+    /// Read-only access to the tool registry.
+    pub fn tool_registry(&self) -> &ToolRegistry {
+        &self.tool_registry
+    }
+
     /// Get the context tracker for display purposes.
     pub fn context(&self) -> &ContextTracker {
         &self.context
