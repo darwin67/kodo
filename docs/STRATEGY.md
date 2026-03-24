@@ -316,19 +316,19 @@ Get a working chat loop: user types a message, Anthropic responds with streaming
 
 Give the agent the ability to act on the codebase.
 
-- [ ] Define `Tool` trait and `ToolRegistry`
-- [ ] Implement `file_read` tool
-- [ ] Implement `file_write` tool
-- [ ] Implement `file_edit` tool (string replacement)
-- [ ] Implement `shell` execution tool
-- [ ] Implement `glob_search` tool
-- [ ] Implement `grep_search` tool
-- [ ] Implement `web_fetch` tool
-- [ ] Wire tool calling into agentic loop (LLM tool_use -> dispatch -> feed result back)
+- [x] Define `Tool` trait and `ToolRegistry`
+- [x] Implement `file_read` tool
+- [x] Implement `file_write` tool
+- [x] Implement `file_edit` tool (string replacement)
+- [x] Implement `shell` execution tool
+- [x] Implement `glob_search` tool
+- [x] Implement `grep_search` tool
+- [x] Implement `web_fetch` tool
+- [x] Wire tool calling into agentic loop (LLM tool_use -> dispatch -> feed result back)
 - [ ] Text-based tool calling fallback (XML/JSON parsing for models without native support)
-- [ ] `kodo-fmt` crate: formatter registry + runner
-- [ ] Hook formatters into file_write / file_edit (silent format, log to UI)
-- [ ] Built-in formatters: cargo fmt, gofmt, prettier, ruff
+- [x] `kodo-fmt` crate: formatter registry + runner
+- [x] Hook formatters into file_write / file_edit (silent format, log to UI)
+- [x] Built-in formatters: cargo fmt, gofmt, prettier, ruff
 
 ### Phase 3 — Permissions & Safety
 
