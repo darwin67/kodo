@@ -211,17 +211,17 @@ mod tests {
         // On macOS, temp dirs may have /private prefix, normalize this
         let content_normalized = result.content.replace("/private", "");
 
-        // On Windows, normalize path separators for comparison
+        // Normalize path separators for comparison across platforms
         #[cfg(windows)]
         let content_normalized = content_normalized.replace("\\", "/");
         #[cfg(windows)]
         let expected_path_normalized = expected_path.replace("\\", "/");
 
         #[cfg(unix)]
-        let expected_path_normalized = expected_path;
+        let expected_path_normalized = expected_path.to_string();
 
         assert!(
-            content_normalized.contains(expected_path_normalized),
+            content_normalized.contains(&expected_path_normalized),
             "expected '{}' in output: {}",
             expected_path_normalized,
             result.content
