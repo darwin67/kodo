@@ -61,8 +61,18 @@ impl Tool for ShellTool {
 
             debug!(command, timeout_ms, dir = %working_dir.display(), "executing shell command");
 
+            #[cfg(unix)]
             let child = tokio::process::Command::new("sh")
                 .arg("-c")
+                .arg(command)
+                .current_dir(&working_dir)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()?;
+
+            #[cfg(windows)]
+            let child = tokio::process::Command::new("cmd")
+                .arg("/C")
                 .arg(command)
                 .current_dir(&working_dir)
                 .stdout(std::process::Stdio::piped())
@@ -185,16 +195,35 @@ mod tests {
             working_dir: dir.path().to_path_buf(),
         };
         let tool = ShellTool;
+
+        // Use cross-platform command to get current directory
+        #[cfg(unix)]
         let params = serde_json::json!({"command": "pwd"});
+        #[cfg(windows)]
+        let params = serde_json::json!({"command": "cd"});
+
         let result = tool.execute(params, &ctx).await.unwrap();
         assert!(result.success);
-        // macOS may have /private prefix for temp dirs
-        let dir_str = dir.path().to_str().unwrap();
+
+        // Get expected path string
+        let expected_path = dir.path().to_str().unwrap();
+
+        // On macOS, temp dirs may have /private prefix, normalize this
         let content_normalized = result.content.replace("/private", "");
+
+        // On Windows, normalize path separators for comparison
+        #[cfg(windows)]
+        let content_normalized = content_normalized.replace("\\", "/");
+        #[cfg(windows)]
+        let expected_path_normalized = expected_path.replace("\\", "/");
+
+        #[cfg(unix)]
+        let expected_path_normalized = expected_path;
+
         assert!(
-            content_normalized.contains(dir_str),
+            content_normalized.contains(expected_path_normalized),
             "expected '{}' in output: {}",
-            dir_str,
+            expected_path_normalized,
             result.content
         );
     }
