@@ -93,6 +93,28 @@ impl Agent {
         &mut self.formatter_registry
     }
 
+    /// Get the current model name.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Set the model name at runtime.
+    pub fn set_model(&mut self, model: impl Into<String>) {
+        self.model = model.into();
+    }
+
+    /// Get the current provider name.
+    pub fn provider_name(&self) -> &str {
+        self.provider.name()
+    }
+
+    /// Switch to a different provider at runtime.
+    /// Clears conversation history since message formats differ between providers.
+    pub fn set_provider(&mut self, provider: Arc<dyn Provider>) {
+        self.provider = provider;
+        self.messages.clear();
+    }
+
     /// Get the context tracker for display purposes.
     pub fn context(&self) -> &ContextTracker {
         &self.context

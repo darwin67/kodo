@@ -1,19 +1,49 @@
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
 
 use kodo_core::agent::Agent;
 use kodo_core::mode::Mode;
 use kodo_llm::anthropic::AnthropicProvider;
+use kodo_llm::gemini::GeminiProvider;
+use kodo_llm::ollama::OllamaProvider;
+use kodo_llm::openai::OpenAiProvider;
+use kodo_llm::provider::Provider;
 use kodo_tui::terminal::read_user_input;
 
 #[derive(Parser)]
 #[command(name = "kodo", about = "A coding agent for your terminal")]
 struct Cli {
-    /// Model to use (e.g. claude-sonnet-4-20250514)
+    /// Model to use (e.g. claude-sonnet-4-20250514, gpt-4o, gemini-2.5-flash)
     #[arg(long, short)]
     model: Option<String>,
+
+    /// Provider to use: anthropic, openai, gemini, ollama
+    #[arg(long, short)]
+    provider: Option<String>,
+}
+
+/// Create a provider by name.
+fn create_provider(name: &str) -> Result<Arc<dyn Provider>> {
+    match name {
+        "anthropic" => Ok(Arc::new(AnthropicProvider::from_env()?)),
+        "openai" => Ok(Arc::new(OpenAiProvider::from_env()?)),
+        "gemini" => Ok(Arc::new(GeminiProvider::from_env()?)),
+        "ollama" => Ok(Arc::new(OllamaProvider::from_env())),
+        _ => bail!("unknown provider: {name}. Available: anthropic, openai, gemini, ollama"),
+    }
+}
+
+/// Return the default model for a given provider name.
+fn default_model(provider_name: &str) -> &str {
+    match provider_name {
+        "anthropic" => "claude-sonnet-4-20250514",
+        "openai" => "gpt-4o",
+        "gemini" => "gemini-2.5-flash",
+        "ollama" => "llama3.1",
+        _ => "claude-sonnet-4-20250514",
+    }
 }
 
 #[tokio::main]
@@ -29,19 +59,27 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Initialize the Anthropic provider.
-    let provider = Arc::new(AnthropicProvider::from_env()?);
+    // Determine provider.
+    let provider_name = cli.provider.as_deref().unwrap_or("anthropic");
+    let provider = create_provider(provider_name)?;
+
+    // Determine model.
+    let model = cli
+        .model
+        .unwrap_or_else(|| default_model(provider_name).to_string());
 
     // Build the agent.
-    let mut agent = Agent::new(provider);
-    if let Some(model) = cli.model {
-        agent = agent.with_model(model);
-    }
+    let mut agent = Agent::new(provider).with_model(&model);
 
     // Register built-in tools.
     kodo_tools::register_builtin_tools(agent.tool_registry_mut());
 
     println!("kodo v{}", env!("CARGO_PKG_VERSION"));
+    println!(
+        "Provider: {} | Model: {}",
+        agent.provider_name(),
+        agent.model()
+    );
     println!("Type your message and press Enter. Ctrl+D to exit.\n");
 
     // Main REPL loop.
@@ -72,6 +110,45 @@ async fn main() -> Result<()> {
                     println!("  /mode plan   — read-only (search, read, web fetch)");
                     println!("  /mode build  — full execution (all tools)\n");
                 }
+            }
+            continue;
+        }
+
+        if input.starts_with("/model") {
+            let parts: Vec<&str> = input.splitn(3, ' ').collect();
+            match parts.len() {
+                1 => {
+                    // /model — show current
+                    println!(
+                        "Provider: {} | Model: {}",
+                        agent.provider_name(),
+                        agent.model()
+                    );
+                    println!("  /model <name>              — switch model");
+                    println!("  /model <provider> <name>   — switch provider and model");
+                    println!("  Available providers: anthropic, openai, gemini, ollama\n");
+                }
+                2 => {
+                    // /model <name> — switch model only
+                    agent.set_model(parts[1]);
+                    println!("Model set to: {}\n", agent.model());
+                }
+                3 => {
+                    // /model <provider> <name> — switch provider + model
+                    match create_provider(parts[1]) {
+                        Ok(new_provider) => {
+                            agent.set_provider(new_provider);
+                            agent.set_model(parts[2]);
+                            println!(
+                                "Switched to {} / {} (conversation cleared)\n",
+                                agent.provider_name(),
+                                agent.model()
+                            );
+                        }
+                        Err(e) => println!("Error: {e}\n"),
+                    }
+                }
+                _ => unreachable!(),
             }
             continue;
         }
