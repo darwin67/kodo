@@ -36,14 +36,12 @@ impl CheckpointManager {
     /// Canonicalizes the parent directory (which should exist) and appends the filename.
     /// This handles macOS /tmp -> /private/var/... symlinks.
     fn normalize_path(path: &Path) -> PathBuf {
-        if let Some(parent) = path.parent() {
-            if parent.exists() {
-                if let Ok(canonical_parent) = parent.canonicalize() {
-                    if let Some(file_name) = path.file_name() {
-                        return canonical_parent.join(file_name);
-                    }
-                }
-            }
+        if let Some(parent) = path.parent()
+            && parent.exists()
+            && let Ok(canonical_parent) = parent.canonicalize()
+            && let Some(file_name) = path.file_name()
+        {
+            return canonical_parent.join(file_name);
         }
         path.to_path_buf()
     }

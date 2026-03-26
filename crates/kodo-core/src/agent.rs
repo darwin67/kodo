@@ -268,47 +268,45 @@ impl Agent {
                 debug!(tool = %name, id = %id, "executing tool");
 
                 // Enforce mode restrictions.
-                if let Some(tool) = self.tool_registry.get(name) {
-                    if !self.mode.allows(tool.permission_level()) {
-                        let msg = format!(
-                            "Tool '{}' requires {:?} permission, which is not allowed in {} mode.",
-                            name,
-                            tool.permission_level(),
-                            self.mode
-                        );
-                        eprintln!("\n  [denied: {name} — {msg}]");
-                        results.push(ContentBlock::tool_result(id, &msg, true));
-                        continue;
-                    }
+                if let Some(tool) = self.tool_registry.get(name)
+                    && !self.mode.allows(tool.permission_level())
+                {
+                    let msg = format!(
+                        "Tool '{}' requires {:?} permission, which is not allowed in {} mode.",
+                        name,
+                        tool.permission_level(),
+                        self.mode
+                    );
+                    eprintln!("\n  [denied: {name} — {msg}]");
+                    results.push(ContentBlock::tool_result(id, &msg, true));
+                    continue;
                 }
 
                 // Check for high-risk shell commands in Build mode.
-                if name == "shell" {
-                    if let Some(command) = input.get("command").and_then(|v| v.as_str()) {
-                        if let Some(reason) = safety::check_high_risk(command) {
-                            if !safety::prompt_confirmation(
-                                "shell",
-                                &format!("{reason}\n  Command: {command}"),
-                            ) {
-                                eprintln!("  [cancelled: {name}]");
-                                results.push(ContentBlock::tool_result(
-                                    id,
-                                    "User denied execution of high-risk command.",
-                                    true,
-                                ));
-                                continue;
-                            }
-                        }
-                    }
+                if name == "shell"
+                    && let Some(command) = input.get("command").and_then(|v| v.as_str())
+                    && let Some(reason) = safety::check_high_risk(command)
+                    && !safety::prompt_confirmation(
+                        "shell",
+                        &format!("{reason}\n  Command: {command}"),
+                    )
+                {
+                    eprintln!("  [cancelled: {name}]");
+                    results.push(ContentBlock::tool_result(
+                        id,
+                        "User denied execution of high-risk command.",
+                        true,
+                    ));
+                    continue;
                 }
 
                 // Snapshot file before write/edit for undo support.
-                if FILE_WRITE_TOOLS.contains(&name.as_str()) {
-                    if let Some(path_str) = input.get("path").and_then(|v| v.as_str()) {
-                        let path = PathBuf::from(path_str);
-                        if let Err(e) = self.checkpoints.snapshot(&path).await {
-                            debug!(error = %e, "failed to save checkpoint");
-                        }
+                if FILE_WRITE_TOOLS.contains(&name.as_str())
+                    && let Some(path_str) = input.get("path").and_then(|v| v.as_str())
+                {
+                    let path = PathBuf::from(path_str);
+                    if let Err(e) = self.checkpoints.snapshot(&path).await {
+                        debug!(error = %e, "failed to save checkpoint");
                     }
                 }
 
