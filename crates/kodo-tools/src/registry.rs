@@ -61,6 +61,24 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Return tool definitions filtered by a predicate on permission level.
+    pub fn tool_definitions_filtered(
+        &self,
+        predicate: impl Fn(crate::tool::PermissionLevel) -> bool,
+    ) -> Vec<serde_json::Value> {
+        self.tools
+            .values()
+            .filter(|tool| predicate(tool.permission_level()))
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.name(),
+                    "description": tool.description(),
+                    "input_schema": tool.parameters_schema(),
+                })
+            })
+            .collect()
+    }
+
     /// List all registered tool names.
     pub fn names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()
@@ -123,6 +141,57 @@ mod tests {
 
         fn permission_level(&self) -> PermissionLevel {
             PermissionLevel::Read
+        }
+
+        fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<ToolOutput>> + Send + '_>,
+        > {
+            Box::pin(async {
+                Ok(ToolOutput {
+                    content: format!("executed {}", self.tool_name),
+                    success: true,
+                })
+            })
+        }
+    }
+
+    /// A dummy tool with a configurable permission level.
+    struct DummyToolWithLevel {
+        tool_name: &'static str,
+        level: PermissionLevel,
+    }
+
+    impl DummyToolWithLevel {
+        fn new(name: &'static str, level: PermissionLevel) -> Self {
+            Self {
+                tool_name: name,
+                level,
+            }
+        }
+    }
+
+    impl Tool for DummyToolWithLevel {
+        fn name(&self) -> &str {
+            self.tool_name
+        }
+
+        fn description(&self) -> &str {
+            "A dummy tool with configurable permission level"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {}
+            })
+        }
+
+        fn permission_level(&self) -> PermissionLevel {
+            self.level
         }
 
         fn execute(
@@ -232,5 +301,106 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("unknown tool: nonexistent"));
+    }
+
+    // ---- tool_definitions_filtered tests ----
+
+    fn make_mixed_registry() -> ToolRegistry {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(DummyToolWithLevel::new(
+            "reader",
+            PermissionLevel::Read,
+        )));
+        registry.register(Arc::new(DummyToolWithLevel::new(
+            "writer",
+            PermissionLevel::Write,
+        )));
+        registry.register(Arc::new(DummyToolWithLevel::new(
+            "executor",
+            PermissionLevel::Execute,
+        )));
+        registry.register(Arc::new(DummyToolWithLevel::new(
+            "searcher",
+            PermissionLevel::Read,
+        )));
+        registry
+    }
+
+    fn sorted_names(defs: &[serde_json::Value]) -> Vec<String> {
+        let mut names: Vec<String> = defs
+            .iter()
+            .map(|d| d["name"].as_str().unwrap().to_string())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn filtered_read_only() {
+        let registry = make_mixed_registry();
+        let defs = registry.tool_definitions_filtered(|level| level == PermissionLevel::Read);
+        assert_eq!(defs.len(), 2);
+        let names = sorted_names(&defs);
+        assert_eq!(names, vec!["reader", "searcher"]);
+    }
+
+    #[test]
+    fn filtered_write_only() {
+        let registry = make_mixed_registry();
+        let defs = registry.tool_definitions_filtered(|level| level == PermissionLevel::Write);
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0]["name"], "writer");
+    }
+
+    #[test]
+    fn filtered_execute_only() {
+        let registry = make_mixed_registry();
+        let defs = registry.tool_definitions_filtered(|level| level == PermissionLevel::Execute);
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0]["name"], "executor");
+    }
+
+    #[test]
+    fn filtered_all_allowed() {
+        let registry = make_mixed_registry();
+        let defs = registry.tool_definitions_filtered(|_| true);
+        assert_eq!(defs.len(), 4);
+    }
+
+    #[test]
+    fn filtered_none_allowed() {
+        let registry = make_mixed_registry();
+        let defs = registry.tool_definitions_filtered(|_| false);
+        assert!(defs.is_empty());
+    }
+
+    #[test]
+    fn filtered_read_and_write() {
+        let registry = make_mixed_registry();
+        let defs = registry.tool_definitions_filtered(|level| {
+            matches!(level, PermissionLevel::Read | PermissionLevel::Write)
+        });
+        assert_eq!(defs.len(), 3);
+        let names = sorted_names(&defs);
+        assert_eq!(names, vec!["reader", "searcher", "writer"]);
+    }
+
+    #[test]
+    fn filtered_empty_registry() {
+        let registry = ToolRegistry::new();
+        let defs = registry.tool_definitions_filtered(|_| true);
+        assert!(defs.is_empty());
+    }
+
+    #[test]
+    fn filtered_preserves_definition_format() {
+        let registry = make_mixed_registry();
+        let defs = registry.tool_definitions_filtered(|level| level == PermissionLevel::Read);
+        for def in &defs {
+            assert!(def.get("name").is_some());
+            assert!(def.get("description").is_some());
+            assert!(def.get("input_schema").is_some());
+            assert!(def["input_schema"].is_object());
+        }
     }
 }

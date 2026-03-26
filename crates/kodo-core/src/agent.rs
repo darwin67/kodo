@@ -16,8 +16,10 @@ use kodo_llm::types::{
 use kodo_tools::registry::ToolRegistry;
 use kodo_tools::tool::ToolContext;
 
+use crate::checkpoint::CheckpointManager;
 use crate::context::ContextTracker;
 use crate::mode::Mode;
+use crate::safety;
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
 const DEFAULT_MAX_TOKENS: u32 = 8192;
@@ -41,6 +43,7 @@ pub struct Agent {
     provider: Arc<dyn Provider>,
     tool_registry: ToolRegistry,
     formatter_registry: FormatterRegistry,
+    checkpoints: CheckpointManager,
     messages: Vec<Message>,
     context: ContextTracker,
     pub mode: Mode,
@@ -54,6 +57,7 @@ impl Agent {
             provider,
             tool_registry: ToolRegistry::new(),
             formatter_registry: FormatterRegistry::with_builtins(),
+            checkpoints: CheckpointManager::new(),
             messages: Vec::new(),
             context: ContextTracker::new(),
             mode: Mode::default(),
@@ -92,6 +96,16 @@ impl Agent {
     /// Get the context tracker for display purposes.
     pub fn context(&self) -> &ContextTracker {
         &self.context
+    }
+
+    /// Read-only access to the checkpoint manager.
+    pub fn checkpoints(&self) -> &CheckpointManager {
+        &self.checkpoints
+    }
+
+    /// Undo the most recent file edit.
+    pub async fn undo(&mut self) -> Result<String> {
+        self.checkpoints.undo_last().await
     }
 
     /// Process a user message through the agentic loop.
@@ -137,9 +151,11 @@ impl Agent {
 
     /// Build a completion request from the current conversation state.
     fn build_request(&self) -> CompletionRequest {
+        // Only expose tools that the current mode permits.
+        let mode = self.mode;
         let tools: Vec<ToolDefinition> = self
             .tool_registry
-            .tool_definitions()
+            .tool_definitions_filtered(|level| mode.allows(level))
             .into_iter()
             .map(|v| serde_json::from_value(v).unwrap())
             .collect();
@@ -232,7 +248,10 @@ impl Agent {
     }
 
     /// Execute tool calls from an assistant message and return the results.
-    async fn handle_tool_calls(&self, assistant_message: &Message) -> Result<Vec<ContentBlock>> {
+    async fn handle_tool_calls(
+        &mut self,
+        assistant_message: &Message,
+    ) -> Result<Vec<ContentBlock>> {
         let tool_uses = assistant_message.tool_uses();
         if tool_uses.is_empty() {
             return Ok(vec![]);
@@ -247,6 +266,50 @@ impl Agent {
         for block in tool_uses {
             if let ContentBlock::ToolUse { id, name, input } = block {
                 debug!(tool = %name, id = %id, "executing tool");
+
+                // Enforce mode restrictions.
+                if let Some(tool) = self.tool_registry.get(name)
+                    && !self.mode.allows(tool.permission_level())
+                {
+                    let msg = format!(
+                        "Tool '{}' requires {:?} permission, which is not allowed in {} mode.",
+                        name,
+                        tool.permission_level(),
+                        self.mode
+                    );
+                    eprintln!("\n  [denied: {name} — {msg}]");
+                    results.push(ContentBlock::tool_result(id, &msg, true));
+                    continue;
+                }
+
+                // Check for high-risk shell commands in Build mode.
+                if name == "shell"
+                    && let Some(command) = input.get("command").and_then(|v| v.as_str())
+                    && let Some(reason) = safety::check_high_risk(command)
+                    && !safety::prompt_confirmation(
+                        "shell",
+                        &format!("{reason}\n  Command: {command}"),
+                    )
+                {
+                    eprintln!("  [cancelled: {name}]");
+                    results.push(ContentBlock::tool_result(
+                        id,
+                        "User denied execution of high-risk command.",
+                        true,
+                    ));
+                    continue;
+                }
+
+                // Snapshot file before write/edit for undo support.
+                if FILE_WRITE_TOOLS.contains(&name.as_str())
+                    && let Some(path_str) = input.get("path").and_then(|v| v.as_str())
+                {
+                    let path = PathBuf::from(path_str);
+                    if let Err(e) = self.checkpoints.snapshot(&path).await {
+                        debug!(error = %e, "failed to save checkpoint");
+                    }
+                }
+
                 eprintln!("\n  [tool: {name}]");
 
                 match self.tool_registry.execute(name, input.clone(), &ctx).await {

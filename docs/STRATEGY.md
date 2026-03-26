@@ -334,12 +334,12 @@ Give the agent the ability to act on the codebase.
 
 Protect the user from destructive actions.
 
-- [ ] Plan mode: restrict tools to read-only (file_read, glob, grep, web_fetch)
-- [ ] Build mode: all tools enabled
-- [ ] High-risk command detection (deny-list patterns)
-- [ ] Confirmation prompt for high-risk actions in Build mode
-- [ ] File checkpoints: snapshot content before each edit
-- [ ] Undo: revert to last checkpoint
+- [x] Plan mode: restrict tools to read-only (file_read, glob, grep, web_fetch)
+- [x] Build mode: all tools enabled
+- [x] High-risk command detection (deny-list patterns)
+- [x] Confirmation prompt for high-risk actions in Build mode
+- [x] File checkpoints: snapshot content before each edit
+- [x] Undo: revert to last checkpoint
 
 ### Phase 4 — More Providers
 
