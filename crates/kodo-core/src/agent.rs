@@ -18,6 +18,7 @@ use kodo_tools::tool::ToolContext;
 
 use crate::context::ContextTracker;
 use crate::mode::Mode;
+use crate::safety;
 
 const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
 const DEFAULT_MAX_TOKENS: u32 = 8192;
@@ -262,6 +263,26 @@ impl Agent {
                         eprintln!("\n  [denied: {name} — {msg}]");
                         results.push(ContentBlock::tool_result(id, &msg, true));
                         continue;
+                    }
+                }
+
+                // Check for high-risk shell commands in Build mode.
+                if name == "shell" {
+                    if let Some(command) = input.get("command").and_then(|v| v.as_str()) {
+                        if let Some(reason) = safety::check_high_risk(command) {
+                            if !safety::prompt_confirmation(
+                                "shell",
+                                &format!("{reason}\n  Command: {command}"),
+                            ) {
+                                eprintln!("  [cancelled: {name}]");
+                                results.push(ContentBlock::tool_result(
+                                    id,
+                                    "User denied execution of high-risk command.",
+                                    true,
+                                ));
+                                continue;
+                            }
+                        }
                     }
                 }
 
