@@ -61,6 +61,24 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Return tool definitions filtered by a predicate on permission level.
+    pub fn tool_definitions_filtered(
+        &self,
+        predicate: impl Fn(crate::tool::PermissionLevel) -> bool,
+    ) -> Vec<serde_json::Value> {
+        self.tools
+            .values()
+            .filter(|tool| predicate(tool.permission_level()))
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.name(),
+                    "description": tool.description(),
+                    "input_schema": tool.parameters_schema(),
+                })
+            })
+            .collect()
+    }
+
     /// List all registered tool names.
     pub fn names(&self) -> Vec<&str> {
         self.tools.keys().map(|s| s.as_str()).collect()

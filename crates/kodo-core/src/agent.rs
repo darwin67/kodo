@@ -137,9 +137,11 @@ impl Agent {
 
     /// Build a completion request from the current conversation state.
     fn build_request(&self) -> CompletionRequest {
+        // Only expose tools that the current mode permits.
+        let mode = self.mode;
         let tools: Vec<ToolDefinition> = self
             .tool_registry
-            .tool_definitions()
+            .tool_definitions_filtered(|level| mode.allows(level))
             .into_iter()
             .map(|v| serde_json::from_value(v).unwrap())
             .collect();
@@ -247,6 +249,22 @@ impl Agent {
         for block in tool_uses {
             if let ContentBlock::ToolUse { id, name, input } = block {
                 debug!(tool = %name, id = %id, "executing tool");
+
+                // Enforce mode restrictions.
+                if let Some(tool) = self.tool_registry.get(name) {
+                    if !self.mode.allows(tool.permission_level()) {
+                        let msg = format!(
+                            "Tool '{}' requires {:?} permission, which is not allowed in {} mode.",
+                            name,
+                            tool.permission_level(),
+                            self.mode
+                        );
+                        eprintln!("\n  [denied: {name} — {msg}]");
+                        results.push(ContentBlock::tool_result(id, &msg, true));
+                        continue;
+                    }
+                }
+
                 eprintln!("\n  [tool: {name}]");
 
                 match self.tool_registry.execute(name, input.clone(), &ctx).await {

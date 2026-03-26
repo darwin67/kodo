@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::Parser;
 
 use kodo_core::agent::Agent;
+use kodo_core::mode::Mode;
 use kodo_llm::anthropic::AnthropicProvider;
 use kodo_tui::terminal::read_user_input;
 
@@ -45,7 +46,8 @@ async fn main() -> Result<()> {
 
     // Main REPL loop.
     loop {
-        let input = match read_user_input("> ") {
+        let prompt = format!("[{}] > ", agent.mode);
+        let input = match read_user_input(&prompt) {
             Ok(Some(input)) => input,
             Ok(None) => continue,
             Err(_) => break, // EOF or error
@@ -53,6 +55,25 @@ async fn main() -> Result<()> {
 
         if input == "/quit" || input == "/exit" {
             break;
+        }
+
+        if input == "/mode" || input == "/mode plan" || input == "/mode build" {
+            match input.as_str() {
+                "/mode plan" => {
+                    agent.mode = Mode::Plan;
+                    println!("Switched to plan mode (read-only).\n");
+                }
+                "/mode build" => {
+                    agent.mode = Mode::Build;
+                    println!("Switched to build mode.\n");
+                }
+                _ => {
+                    println!("Current mode: {}", agent.mode);
+                    println!("  /mode plan   — read-only (search, read, web fetch)");
+                    println!("  /mode build  — full execution (all tools)\n");
+                }
+            }
+            continue;
         }
 
         // TODO this will be replaced by modal operations on the TUI/GUI

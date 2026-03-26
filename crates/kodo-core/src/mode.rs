@@ -1,5 +1,7 @@
 use std::fmt;
 
+use kodo_tools::tool::PermissionLevel;
+
 /// The operating mode of the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
@@ -8,6 +10,16 @@ pub enum Mode {
     /// Full execution: all tools enabled, prompt on high-risk actions.
     #[default]
     Build,
+}
+
+impl Mode {
+    /// Whether a tool with the given permission level is allowed in this mode.
+    pub fn allows(&self, level: PermissionLevel) -> bool {
+        match self {
+            Self::Plan => matches!(level, PermissionLevel::Read),
+            Self::Build => true,
+        }
+    }
 }
 
 impl fmt::Display for Mode {
@@ -56,5 +68,37 @@ mod tests {
     fn mode_debug() {
         assert_eq!(format!("{:?}", Mode::Plan), "Plan");
         assert_eq!(format!("{:?}", Mode::Build), "Build");
+    }
+
+    // ----- Permission filtering tests -----
+
+    #[test]
+    fn plan_allows_read() {
+        assert!(Mode::Plan.allows(PermissionLevel::Read));
+    }
+
+    #[test]
+    fn plan_denies_write() {
+        assert!(!Mode::Plan.allows(PermissionLevel::Write));
+    }
+
+    #[test]
+    fn plan_denies_execute() {
+        assert!(!Mode::Plan.allows(PermissionLevel::Execute));
+    }
+
+    #[test]
+    fn build_allows_read() {
+        assert!(Mode::Build.allows(PermissionLevel::Read));
+    }
+
+    #[test]
+    fn build_allows_write() {
+        assert!(Mode::Build.allows(PermissionLevel::Write));
+    }
+
+    #[test]
+    fn build_allows_execute() {
+        assert!(Mode::Build.allows(PermissionLevel::Execute));
     }
 }
