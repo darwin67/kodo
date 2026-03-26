@@ -364,10 +364,10 @@ impl Provider for OpenAiProvider {
 
         let mut content_blocks = Vec::new();
 
-        if let Some(text) = &choice.message.content {
-            if !text.is_empty() {
-                content_blocks.push(ContentBlock::text(text));
-            }
+        if let Some(text) = &choice.message.content
+            && !text.is_empty()
+        {
+            content_blocks.push(ContentBlock::text(text));
         }
 
         if let Some(tool_calls) = &choice.message.tool_calls {
@@ -428,9 +428,7 @@ impl Provider for OpenAiProvider {
                             let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
                             buffer = buffer[newline_pos + 1..].to_string();
 
-                            if line.starts_with("data: ") {
-                                let data = &line["data: ".len()..];
-
+                            if let Some(data) = line.strip_prefix("data: ") {
                                 if data == "[DONE]" {
                                     return None;
                                 }
@@ -438,32 +436,32 @@ impl Provider for OpenAiProvider {
                                 match serde_json::from_str::<SseChunk>(data) {
                                     Ok(chunk) => {
                                         // Handle usage in the final chunk.
-                                        if let Some(usage) = &chunk.usage {
-                                            if chunk.choices.is_empty() {
-                                                return Some((
-                                                    Ok(StreamEvent::MessageDone {
-                                                        stop_reason: StopReason::EndTurn,
-                                                        usage: Usage {
-                                                            input_tokens: usage.prompt_tokens,
-                                                            output_tokens: usage.completion_tokens,
-                                                        },
-                                                    }),
-                                                    (byte_stream, buffer),
-                                                ));
-                                            }
+                                        if let Some(usage) = &chunk.usage
+                                            && chunk.choices.is_empty()
+                                        {
+                                            return Some((
+                                                Ok(StreamEvent::MessageDone {
+                                                    stop_reason: StopReason::EndTurn,
+                                                    usage: Usage {
+                                                        input_tokens: usage.prompt_tokens,
+                                                        output_tokens: usage.completion_tokens,
+                                                    },
+                                                }),
+                                                (byte_stream, buffer),
+                                            ));
                                         }
 
                                         if let Some(choice) = chunk.choices.first() {
                                             // Text content delta.
-                                            if let Some(text) = &choice.delta.content {
-                                                if !text.is_empty() {
-                                                    return Some((
-                                                        Ok(StreamEvent::TextDelta {
-                                                            text: text.clone(),
-                                                        }),
-                                                        (byte_stream, buffer),
-                                                    ));
-                                                }
+                                            if let Some(text) = &choice.delta.content
+                                                && !text.is_empty()
+                                            {
+                                                return Some((
+                                                    Ok(StreamEvent::TextDelta {
+                                                        text: text.clone(),
+                                                    }),
+                                                    (byte_stream, buffer),
+                                                ));
                                             }
 
                                             // Tool call deltas.
@@ -484,17 +482,16 @@ impl Provider for OpenAiProvider {
                                                         ));
                                                     }
 
-                                                    if let Some(func) = &tc.function {
-                                                        if let Some(args) = &func.arguments {
-                                                            if !args.is_empty() {
-                                                                return Some((
-                                                                Ok(StreamEvent::ToolInputDelta {
-                                                                    json: args.clone(),
-                                                                }),
-                                                                (byte_stream, buffer),
-                                                            ));
-                                                            }
-                                                        }
+                                                    if let Some(func) = &tc.function
+                                                        && let Some(args) = &func.arguments
+                                                        && !args.is_empty()
+                                                    {
+                                                        return Some((
+                                                            Ok(StreamEvent::ToolInputDelta {
+                                                                json: args.clone(),
+                                                            }),
+                                                            (byte_stream, buffer),
+                                                        ));
                                                     }
                                                 }
                                             }

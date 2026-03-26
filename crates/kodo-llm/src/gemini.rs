@@ -278,10 +278,10 @@ impl Provider for GeminiProvider {
         let mut has_function_call = false;
 
         for part in &candidate.content.parts {
-            if let Some(text) = &part.text {
-                if !text.is_empty() {
-                    content_blocks.push(ContentBlock::text(text));
-                }
+            if let Some(text) = &part.text
+                && !text.is_empty()
+            {
+                content_blocks.push(ContentBlock::text(text));
             }
             if let Some(fc) = &part.function_call {
                 has_function_call = true;
@@ -360,22 +360,20 @@ impl Provider for GeminiProvider {
                             let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
                             buffer = buffer[newline_pos + 1..].to_string();
 
-                            if line.starts_with("data: ") {
-                                let data = &line["data: ".len()..];
-
+                            if let Some(data) = line.strip_prefix("data: ") {
                                 match serde_json::from_str::<ApiResponse>(data) {
                                     Ok(resp) => {
                                         if let Some(candidate) = resp.candidates.first() {
                                             for part in &candidate.content.parts {
-                                                if let Some(text) = &part.text {
-                                                    if !text.is_empty() {
-                                                        return Some((
-                                                            Ok(StreamEvent::TextDelta {
-                                                                text: text.clone(),
-                                                            }),
-                                                            (byte_stream, buffer),
-                                                        ));
-                                                    }
+                                                if let Some(text) = &part.text
+                                                    && !text.is_empty()
+                                                {
+                                                    return Some((
+                                                        Ok(StreamEvent::TextDelta {
+                                                            text: text.clone(),
+                                                        }),
+                                                        (byte_stream, buffer),
+                                                    ));
                                                 }
                                                 if let Some(fc) = &part.function_call {
                                                     let id = format!("gemini_{}", fc.name);
