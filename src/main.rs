@@ -76,6 +76,14 @@ async fn main() -> Result<()> {
             continue;
         }
 
+        if input == "/undo" {
+            match agent.undo().await {
+                Ok(msg) => println!("{msg}\n"),
+                Err(e) => println!("Cannot undo: {e}\n"),
+            }
+            continue;
+        }
+
         // TODO this will be replaced by modal operations on the TUI/GUI
         if input == "/tools" {
             let registry = agent.tool_registry();

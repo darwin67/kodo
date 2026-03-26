@@ -16,6 +16,7 @@ use kodo_llm::types::{
 use kodo_tools::registry::ToolRegistry;
 use kodo_tools::tool::ToolContext;
 
+use crate::checkpoint::CheckpointManager;
 use crate::context::ContextTracker;
 use crate::mode::Mode;
 use crate::safety;
@@ -42,6 +43,7 @@ pub struct Agent {
     provider: Arc<dyn Provider>,
     tool_registry: ToolRegistry,
     formatter_registry: FormatterRegistry,
+    checkpoints: CheckpointManager,
     messages: Vec<Message>,
     context: ContextTracker,
     pub mode: Mode,
@@ -55,6 +57,7 @@ impl Agent {
             provider,
             tool_registry: ToolRegistry::new(),
             formatter_registry: FormatterRegistry::with_builtins(),
+            checkpoints: CheckpointManager::new(),
             messages: Vec::new(),
             context: ContextTracker::new(),
             mode: Mode::default(),
@@ -93,6 +96,16 @@ impl Agent {
     /// Get the context tracker for display purposes.
     pub fn context(&self) -> &ContextTracker {
         &self.context
+    }
+
+    /// Read-only access to the checkpoint manager.
+    pub fn checkpoints(&self) -> &CheckpointManager {
+        &self.checkpoints
+    }
+
+    /// Undo the most recent file edit.
+    pub async fn undo(&mut self) -> Result<String> {
+        self.checkpoints.undo_last().await
     }
 
     /// Process a user message through the agentic loop.
@@ -235,7 +248,10 @@ impl Agent {
     }
 
     /// Execute tool calls from an assistant message and return the results.
-    async fn handle_tool_calls(&self, assistant_message: &Message) -> Result<Vec<ContentBlock>> {
+    async fn handle_tool_calls(
+        &mut self,
+        assistant_message: &Message,
+    ) -> Result<Vec<ContentBlock>> {
         let tool_uses = assistant_message.tool_uses();
         if tool_uses.is_empty() {
             return Ok(vec![]);
@@ -282,6 +298,16 @@ impl Agent {
                                 ));
                                 continue;
                             }
+                        }
+                    }
+                }
+
+                // Snapshot file before write/edit for undo support.
+                if FILE_WRITE_TOOLS.contains(&name.as_str()) {
+                    if let Some(path_str) = input.get("path").and_then(|v| v.as_str()) {
+                        let path = PathBuf::from(path_str);
+                        if let Err(e) = self.checkpoints.snapshot(&path).await {
+                            debug!(error = %e, "failed to save checkpoint");
                         }
                     }
                 }
