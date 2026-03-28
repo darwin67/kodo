@@ -344,13 +344,13 @@ Make kodo truly model-agnostic.
 
 Remember conversations across restarts.
 
-- [ ] SQLite setup: schema and migrations
-- [ ] Session creation with auto-generated ID
-- [ ] Session listing and resume
-- [ ] Session fork
-- [ ] Conversation history persistence (save/load messages)
-- [ ] Auth token storage in DB
-- [ ] ~KODO.md~ project memory file: load at session start
+- [x] SQLite setup: schema and migrations
+- [x] Session creation with auto-generated ID
+- [x] Session listing and resume
+- [x] Session fork
+- [x] Conversation history persistence (save/load messages)
+- [x] Auth token storage in DB
+- [x] ~KODO.md~ project memory file: load at session start
 
 ** Phase 6 — Full TUI (ratatui)
 
