@@ -345,10 +345,10 @@ Protect the user from destructive actions.
 
 Make kodo truly model-agnostic.
 
-- [ ] OpenAI provider (Chat Completions API + streaming)
-- [ ] Google Gemini provider
-- [ ] Ollama provider (local, OpenAI-compatible API)
-- [ ] Model switching command (change provider/model mid-session)
+- [x] OpenAI provider (Chat Completions API + streaming)
+- [x] Google Gemini provider
+- [x] Ollama provider (local, OpenAI-compatible API)
+- [x] Model switching command (change provider/model mid-session)
 
 ### Phase 5 — Persistence & Sessions
 
