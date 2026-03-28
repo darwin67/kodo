@@ -51,6 +51,19 @@ pub async fn open(path: &Path) -> Result<DbPool> {
 
     run_migrations(&pool).await?;
 
+    // Restrict file permissions to owner-only (0600).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            let mut perms = metadata.permissions();
+            perms.set_mode(0o600);
+            if let Err(e) = std::fs::set_permissions(path, perms) {
+                tracing::warn!(error = %e, "failed to set database file permissions to 600");
+            }
+        }
+    }
+
     Ok(pool)
 }
 
@@ -130,6 +143,19 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(count.0, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn file_db_has_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("secure.db");
+        let _pool = open(&db_path).await.unwrap();
+
+        let metadata = std::fs::metadata(&db_path).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "DB file should be owner-only (0600)");
     }
 
     #[tokio::test]
