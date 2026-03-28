@@ -4,6 +4,17 @@ use tracing::debug;
 
 use crate::db::DbPool;
 
+/// Raw session data tuple from database queries.
+type SessionRow = (
+    String,
+    String,
+    Option<String>,
+    String,
+    String,
+    String,
+    String,
+);
+
 /// A conversation session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -55,7 +66,7 @@ pub async fn create_session(
 
 /// Get a session by ID.
 pub async fn get_session(pool: &DbPool, id: &str) -> Result<Option<Session>> {
-    let row: Option<(String, String, Option<String>, String, String, String, String)> =
+    let row: Option<SessionRow> =
         sqlx::query_as(
             "SELECT id, directory, branch, provider, model, created_at, updated_at FROM sessions WHERE id = ?",
         )
@@ -76,15 +87,7 @@ pub async fn get_session(pool: &DbPool, id: &str) -> Result<Option<Session>> {
 
 /// List sessions, most recently updated first.
 pub async fn list_sessions(pool: &DbPool, limit: u32) -> Result<Vec<Session>> {
-    let rows: Vec<(
-        String,
-        String,
-        Option<String>,
-        String,
-        String,
-        String,
-        String,
-    )> = sqlx::query_as(
+    let rows: Vec<SessionRow> = sqlx::query_as(
         "SELECT id, directory, branch, provider, model, created_at, updated_at \
              FROM sessions ORDER BY updated_at DESC LIMIT ?",
     )
