@@ -26,6 +26,9 @@ struct Cli {
 
 /// Create a provider by name.
 fn create_provider(name: &str) -> Result<Arc<dyn Provider>> {
+    // TODO
+    // credentials should be able to be set on run time and stored.
+    // and future processes/sessions will be able to reuse those crede
     match name {
         "anthropic" => Ok(Arc::new(AnthropicProvider::from_env()?)),
         "openai" => Ok(Arc::new(OpenAiProvider::from_env()?)),
