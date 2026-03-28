@@ -111,6 +111,8 @@ impl Agent {
     /// Switch to a different provider at runtime.
     /// Clears conversation history since message formats differ between providers.
     pub fn set_provider(&mut self, provider: Arc<dyn Provider>) {
+        // TODO context shouldn't be lost though.
+        // something to consider on how to share sessions
         self.provider = provider;
         self.messages.clear();
     }
