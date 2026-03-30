@@ -2,11 +2,12 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
-use crate::crypto;
+use crate::crypto::{self, SecretStore};
 use crate::db::DbPool;
 
 /// A stored auth token for a provider.
-/// Tokens are returned in plaintext after decryption.
+/// The actual token/refresh_token are stored in the OS keychain.
+/// Only non-sensitive metadata is in the database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthToken {
     pub provider: String,
@@ -16,34 +17,37 @@ pub struct AuthToken {
 }
 
 /// Store or update an auth token for a provider.
-/// Tokens and refresh tokens are encrypted at rest using AES-256-GCM.
+///
+/// The token and refresh_token are stored via the given `SecretStore` (OS
+/// keychain in production, in-memory store in tests). Only the provider
+/// name and expiry metadata are stored in the database.
 pub async fn save_token(
     pool: &DbPool,
+    store: &dyn SecretStore,
     provider: &str,
     token: &str,
     refresh_token: Option<&str>,
     expires_at: Option<&str>,
 ) -> Result<()> {
-    debug!(provider, "saving auth token (encrypted)");
+    debug!(provider, "saving auth token");
 
-    let key = crypto::derive_machine_key();
-    let encrypted_token = crypto::encrypt(token, &key)?;
-    let encrypted_refresh = refresh_token
-        .map(|rt| crypto::encrypt(rt, &key))
-        .transpose()?;
+    // Store secrets in the secret store.
+    crypto::set_secret(store, provider, "token", token)?;
+    if let Some(rt) = refresh_token {
+        crypto::set_secret(store, provider, "refresh_token", rt)?;
+    } else {
+        crypto::delete_secret(store, provider, "refresh_token")?;
+    }
 
+    // Store metadata in DB (no secrets).
     sqlx::query(
         "INSERT INTO auth_tokens (provider, token, refresh_token, expires_at) \
-         VALUES (?, ?, ?, ?) \
+         VALUES (?, '', '', ?) \
          ON CONFLICT(provider) DO UPDATE SET \
-           token = excluded.token, \
-           refresh_token = excluded.refresh_token, \
            expires_at = excluded.expires_at, \
            updated_at = datetime('now')",
     )
     .bind(provider)
-    .bind(&encrypted_token)
-    .bind(&encrypted_refresh)
     .bind(expires_at)
     .execute(pool)
     .await?;
@@ -52,38 +56,51 @@ pub async fn save_token(
 }
 
 /// Get the auth token for a provider.
-/// Returns the decrypted plaintext token.
-pub async fn get_token(pool: &DbPool, provider: &str) -> Result<Option<AuthToken>> {
-    let row: Option<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT provider, token, refresh_token, expires_at FROM auth_tokens WHERE provider = ?",
-    )
-    .bind(provider)
-    .fetch_optional(pool)
-    .await?;
+///
+/// Retrieves the actual secrets from the secret store and metadata from the DB.
+pub async fn get_token(
+    pool: &DbPool,
+    store: &dyn SecretStore,
+    provider: &str,
+) -> Result<Option<AuthToken>> {
+    let row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT provider, expires_at FROM auth_tokens WHERE provider = ?")
+            .bind(provider)
+            .fetch_optional(pool)
+            .await?;
 
-    match row {
-        Some(r) => {
-            let key = crypto::derive_machine_key();
-            let token = crypto::decrypt(&r.1, &key)?;
-            let refresh_token = r.2.map(|rt| crypto::decrypt(&rt, &key)).transpose()?;
+    let (provider_name, expires_at) = match row {
+        Some(r) => r,
+        None => return Ok(None),
+    };
 
-            Ok(Some(AuthToken {
-                provider: r.0,
-                token,
-                refresh_token,
-                expires_at: r.3,
-            }))
-        }
-        None => Ok(None),
-    }
+    let token = match crypto::get_secret(store, &provider_name, "token")? {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+
+    let refresh_token = crypto::get_secret(store, &provider_name, "refresh_token")?;
+
+    Ok(Some(AuthToken {
+        provider: provider_name,
+        token,
+        refresh_token,
+        expires_at,
+    }))
 }
 
 /// Delete an auth token for a provider.
-pub async fn delete_token(pool: &DbPool, provider: &str) -> Result<()> {
+pub async fn delete_token(pool: &DbPool, store: &dyn SecretStore, provider: &str) -> Result<()> {
+    debug!(provider, "deleting auth token");
+
+    crypto::delete_secret(store, provider, "token")?;
+    crypto::delete_secret(store, provider, "refresh_token")?;
+
     sqlx::query("DELETE FROM auth_tokens WHERE provider = ?")
         .bind(provider)
         .execute(pool)
         .await?;
+
     Ok(())
 }
 
@@ -98,108 +115,115 @@ pub async fn list_providers(pool: &DbPool) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crypto::MemoryStore;
     use crate::db::open_memory;
+
+    fn store() -> MemoryStore {
+        MemoryStore::new()
+    }
 
     #[tokio::test]
     async fn save_and_get_token_roundtrip() {
         let pool = open_memory().await.unwrap();
-        save_token(&pool, "anthropic", "sk-ant-123", None, None)
+        let s = store();
+        save_token(&pool, &s, "anthropic", "sk-ant-123", None, None)
             .await
             .unwrap();
 
-        let token = get_token(&pool, "anthropic").await.unwrap().unwrap();
-        assert_eq!(token.provider, "anthropic");
+        let token = get_token(&pool, &s, "anthropic").await.unwrap().unwrap();
         assert_eq!(token.token, "sk-ant-123");
         assert!(token.refresh_token.is_none());
     }
 
     #[tokio::test]
-    async fn token_is_encrypted_in_db() {
+    async fn token_not_in_db() {
         let pool = open_memory().await.unwrap();
-        save_token(&pool, "openai", "sk-plaintext-key", None, None)
+        let s = store();
+        save_token(&pool, &s, "openai", "secret-key", None, None)
             .await
             .unwrap();
 
-        // Read the raw value from the DB — it should NOT be the plaintext.
         let row: (String,) =
             sqlx::query_as("SELECT token FROM auth_tokens WHERE provider = 'openai'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-
-        assert_ne!(row.0, "sk-plaintext-key", "token should be encrypted in DB");
-        assert!(
-            row.0.len() > "sk-plaintext-key".len(),
-            "encrypted token should be longer than plaintext"
-        );
+        assert_eq!(row.0, "", "DB token column should be empty");
     }
 
     #[tokio::test]
     async fn upsert_token() {
         let pool = open_memory().await.unwrap();
-        save_token(&pool, "openai", "key-1", None, None)
+        let s = store();
+        save_token(&pool, &s, "openai", "key-1", None, None)
             .await
             .unwrap();
-        save_token(&pool, "openai", "key-2", Some("refresh-2"), None)
+        save_token(&pool, &s, "openai", "key-2", Some("refresh-2"), None)
             .await
             .unwrap();
 
-        let token = get_token(&pool, "openai").await.unwrap().unwrap();
+        let token = get_token(&pool, &s, "openai").await.unwrap().unwrap();
         assert_eq!(token.token, "key-2");
         assert_eq!(token.refresh_token, Some("refresh-2".into()));
     }
 
     #[tokio::test]
-    async fn refresh_token_encrypted_roundtrip() {
+    async fn refresh_token_roundtrip() {
         let pool = open_memory().await.unwrap();
+        let s = store();
         save_token(
             &pool,
+            &s,
             "google",
-            "access-token",
+            "access",
             Some("refresh-secret"),
             Some("2025-12-31"),
         )
         .await
         .unwrap();
 
-        let token = get_token(&pool, "google").await.unwrap().unwrap();
-        assert_eq!(token.token, "access-token");
+        let token = get_token(&pool, &s, "google").await.unwrap().unwrap();
+        assert_eq!(token.token, "access");
         assert_eq!(token.refresh_token, Some("refresh-secret".into()));
         assert_eq!(token.expires_at, Some("2025-12-31".into()));
-
-        // Verify raw refresh_token is also encrypted.
-        let row: (Option<String>,) =
-            sqlx::query_as("SELECT refresh_token FROM auth_tokens WHERE provider = 'google'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_ne!(row.0.as_deref(), Some("refresh-secret"));
     }
 
     #[tokio::test]
     async fn get_nonexistent_token() {
         let pool = open_memory().await.unwrap();
-        let result = get_token(&pool, "nope").await.unwrap();
+        let s = store();
+        let result = get_token(&pool, &s, "nope").await.unwrap();
         assert!(result.is_none());
     }
 
     #[tokio::test]
     async fn delete_token_works() {
         let pool = open_memory().await.unwrap();
-        save_token(&pool, "anthropic", "key", None, None)
+        let s = store();
+        save_token(&pool, &s, "anthropic", "key", None, None)
             .await
             .unwrap();
-        delete_token(&pool, "anthropic").await.unwrap();
-        assert!(get_token(&pool, "anthropic").await.unwrap().is_none());
+        delete_token(&pool, &s, "anthropic").await.unwrap();
+        assert!(get_token(&pool, &s, "anthropic").await.unwrap().is_none());
+
+        // Secret store should also be cleaned up.
+        assert!(
+            crypto::get_secret(&s, "anthropic", "token")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
     async fn list_providers_works() {
         let pool = open_memory().await.unwrap();
-        save_token(&pool, "anthropic", "a", None, None)
+        let s = store();
+        save_token(&pool, &s, "anthropic", "a", None, None)
             .await
             .unwrap();
-        save_token(&pool, "openai", "b", None, None).await.unwrap();
+        save_token(&pool, &s, "openai", "b", None, None)
+            .await
+            .unwrap();
 
         let providers = list_providers(&pool).await.unwrap();
         assert_eq!(providers, vec!["anthropic", "openai"]);
