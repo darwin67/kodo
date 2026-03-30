@@ -60,6 +60,12 @@ impl MemoryStore {
     }
 }
 
+impl Default for MemoryStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SecretStore for MemoryStore {
     fn set(&self, key: &str, value: &str) -> Result<()> {
         self.data
