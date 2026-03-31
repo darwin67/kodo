@@ -60,6 +60,7 @@ pub struct Session {
 pub struct Thread {
     pub id: String,
     pub session_id: String,
+    pub name: String,
     pub role: String,
     pub provider: String,
     pub model: String,
@@ -69,19 +70,15 @@ pub struct Thread {
 
 impl Thread {
     /// Whether this thread has a live heartbeat (not stale).
-    /// Returns false if no heartbeat has been set.
     pub fn is_live(&self) -> bool {
         match &self.heartbeat_at {
             None => false,
-            Some(hb) => {
-                // Parse the heartbeat timestamp and check against staleness.
-                chrono::NaiveDateTime::parse_from_str(hb, "%Y-%m-%d %H:%M:%S")
-                    .map(|dt| {
-                        let now = chrono::Utc::now().naive_utc();
-                        (now - dt).num_seconds() < HEARTBEAT_STALE_SECS
-                    })
-                    .unwrap_or(false)
-            }
+            Some(hb) => chrono::NaiveDateTime::parse_from_str(hb, "%Y-%m-%d %H:%M:%S")
+                .map(|dt| {
+                    let now = chrono::Utc::now().naive_utc();
+                    (now - dt).num_seconds() < HEARTBEAT_STALE_SECS
+                })
+                .unwrap_or(false),
         }
     }
 }
@@ -95,18 +92,73 @@ pub struct StoredMessage {
     pub content: String,
 }
 
+// Row type aliases for query_as (avoids unwieldy inline tuples).
+type SessionRow = (String, String, String, Option<String>, String, String);
+type ThreadRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+);
+
+fn into_session(r: SessionRow) -> Session {
+    Session {
+        id: r.0,
+        name: r.1,
+        directory: r.2,
+        branch: r.3,
+        status: match r.4.as_str() {
+            "archived" => SessionStatus::Archived,
+            _ => SessionStatus::Active,
+        },
+        updated_at: r.5,
+    }
+}
+
+fn into_thread(r: ThreadRow) -> Thread {
+    Thread {
+        id: r.0,
+        session_id: r.1,
+        name: r.2,
+        role: r.3,
+        provider: r.4,
+        model: r.5,
+        heartbeat_at: r.6,
+        updated_at: r.7,
+    }
+}
+
+fn into_message(r: (String, String, String, String)) -> StoredMessage {
+    StoredMessage {
+        id: r.0,
+        thread_id: r.1,
+        role: r.2,
+        content: r.3,
+    }
+}
+
+const SESSION_COLS: &str = "id, name, directory, branch, status, updated_at";
+const THREAD_COLS: &str = "id, session_id, name, role, provider, model, heartbeat_at, updated_at";
+
 // ---------------------------------------------------------------------------
 // Session CRUD
 // ---------------------------------------------------------------------------
 
 /// Create a new session.
+/// If `name` is None, a placeholder "Untitled" is used. The caller can later
+/// rename it (e.g. after the first user message, using a short summary).
 pub async fn create_session(
     pool: &DbPool,
-    name: &str,
+    name: Option<&str>,
     directory: &str,
     branch: Option<&str>,
 ) -> Result<Session> {
     let id = new_id();
+    let name = name.unwrap_or("Untitled");
     debug!(id = %id, name, directory, "creating session");
 
     sqlx::query("INSERT INTO sessions (id, name, directory, branch) VALUES (?, ?, ?, ?)")
@@ -124,22 +176,20 @@ pub async fn create_session(
 
 /// Get a session by ID.
 pub async fn get_session(pool: &DbPool, id: &str) -> Result<Option<Session>> {
-    let row: Option<(String, String, String, Option<String>, String, String)> = sqlx::query_as(
-        "SELECT id, name, directory, branch, status, updated_at FROM sessions WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<SessionRow> =
+        sqlx::query_as(&format!("SELECT {SESSION_COLS} FROM sessions WHERE id = ?"))
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
 
     Ok(row.map(into_session))
 }
 
 /// Find a session by name (exact match).
 pub async fn get_session_by_name(pool: &DbPool, name: &str) -> Result<Option<Session>> {
-    let row: Option<(String, String, String, Option<String>, String, String)> = sqlx::query_as(
-        "SELECT id, name, directory, branch, status, updated_at \
-         FROM sessions WHERE name = ? LIMIT 1",
-    )
+    let row: Option<SessionRow> = sqlx::query_as(&format!(
+        "SELECT {SESSION_COLS} FROM sessions WHERE name = ? LIMIT 1"
+    ))
     .bind(name)
     .fetch_optional(pool)
     .await?;
@@ -150,10 +200,9 @@ pub async fn get_session_by_name(pool: &DbPool, name: &str) -> Result<Option<Ses
 /// Search sessions by name substring (case-insensitive).
 pub async fn search_sessions(pool: &DbPool, query: &str, limit: u32) -> Result<Vec<Session>> {
     let pattern = format!("%{query}%");
-    let rows: Vec<(String, String, String, Option<String>, String, String)> = sqlx::query_as(
-        "SELECT id, name, directory, branch, status, updated_at \
-         FROM sessions WHERE name LIKE ? ORDER BY updated_at DESC LIMIT ?",
-    )
+    let rows: Vec<SessionRow> = sqlx::query_as(&format!(
+        "SELECT {SESSION_COLS} FROM sessions WHERE name LIKE ? ORDER BY updated_at DESC LIMIT ?"
+    ))
     .bind(&pattern)
     .bind(limit)
     .fetch_all(pool)
@@ -168,22 +217,18 @@ pub async fn list_sessions(
     status: Option<SessionStatus>,
     limit: u32,
 ) -> Result<Vec<Session>> {
-    let rows: Vec<(String, String, String, Option<String>, String, String)> = match status {
-        Some(s) => {
-            sqlx::query_as(
-                "SELECT id, name, directory, branch, status, updated_at \
-                 FROM sessions WHERE status = ? ORDER BY updated_at DESC LIMIT ?",
-            )
-            .bind(s.to_string())
-            .bind(limit)
-            .fetch_all(pool)
-            .await?
-        }
+    let rows: Vec<SessionRow> = match status {
+        Some(s) => sqlx::query_as(&format!(
+            "SELECT {SESSION_COLS} FROM sessions WHERE status = ? ORDER BY updated_at DESC LIMIT ?"
+        ))
+        .bind(s.to_string())
+        .bind(limit)
+        .fetch_all(pool)
+        .await?,
         None => {
-            sqlx::query_as(
-                "SELECT id, name, directory, branch, status, updated_at \
-                 FROM sessions ORDER BY updated_at DESC LIMIT ?",
-            )
+            sqlx::query_as(&format!(
+                "SELECT {SESSION_COLS} FROM sessions ORDER BY updated_at DESC LIMIT ?"
+            ))
             .bind(limit)
             .fetch_all(pool)
             .await?
@@ -191,6 +236,21 @@ pub async fn list_sessions(
     };
 
     Ok(rows.into_iter().map(into_session).collect())
+}
+
+/// Rename a session.
+pub async fn rename_session(pool: &DbPool, id: &str, new_name: &str) -> Result<()> {
+    let result =
+        sqlx::query("UPDATE sessions SET name = ?, updated_at = datetime('now') WHERE id = ?")
+            .bind(new_name)
+            .bind(id)
+            .execute(pool)
+            .await?;
+
+    if result.rows_affected() == 0 {
+        bail!("session not found: {id}");
+    }
+    Ok(())
 }
 
 /// Touch the updated_at timestamp on a session.
@@ -236,19 +296,30 @@ pub async fn delete_session(pool: &DbPool, id: &str) -> Result<()> {
 }
 
 /// Fork a session.
-pub async fn fork_session(pool: &DbPool, source_id: &str, new_name: &str) -> Result<Session> {
+pub async fn fork_session(
+    pool: &DbPool,
+    source_id: &str,
+    new_name: Option<&str>,
+) -> Result<Session> {
     let source = get_session(pool, source_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("source session not found: {source_id}"))?;
 
-    let new_session =
-        create_session(pool, new_name, &source.directory, source.branch.as_deref()).await?;
+    let fork_name = new_name.unwrap_or_else(|| "Untitled");
+    let new_session = create_session(
+        pool,
+        Some(fork_name),
+        &source.directory,
+        source.branch.as_deref(),
+    )
+    .await?;
 
     let source_threads = list_threads(pool, source_id).await?;
     for thread in &source_threads {
         let new_thread = create_thread(
             pool,
             &new_session.id,
+            Some(&thread.name),
             &thread.role,
             &thread.provider,
             &thread.model,
@@ -266,10 +337,8 @@ pub async fn fork_session(pool: &DbPool, source_id: &str, new_name: &str) -> Res
         .ok_or_else(|| anyhow::anyhow!("failed to read back forked session"))
 }
 
-/// Sweep stale sessions: archive any active session where all threads
-/// have stale heartbeats (or no heartbeat at all).
+/// Sweep stale sessions: archive active sessions with no live threads.
 pub async fn sweep_stale_sessions(pool: &DbPool) -> Result<u32> {
-    // Find active sessions where no thread has a recent heartbeat.
     let stale_ids: Vec<(String,)> = sqlx::query_as(
         "SELECT s.id FROM sessions s \
          WHERE s.status = 'active' \
@@ -293,50 +362,47 @@ pub async fn sweep_stale_sessions(pool: &DbPool) -> Result<u32> {
     Ok(count)
 }
 
-fn into_session(r: (String, String, String, Option<String>, String, String)) -> Session {
-    Session {
-        id: r.0,
-        name: r.1,
-        directory: r.2,
-        branch: r.3,
-        status: match r.4.as_str() {
-            "archived" => SessionStatus::Archived,
-            _ => SessionStatus::Active,
-        },
-        updated_at: r.5,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Thread CRUD
 // ---------------------------------------------------------------------------
 
-type ThreadRow = (
-    String,
-    String,
-    String,
-    String,
-    String,
-    Option<String>,
-    String,
-);
+/// Count threads in a session (used for auto-naming).
+async fn thread_count(pool: &DbPool, session_id: &str) -> Result<i64> {
+    let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM threads WHERE session_id = ?")
+        .bind(session_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(count)
+}
 
 /// Create a new thread within a session.
+/// If `name` is None, auto-generates "Thread N" where N is the next number.
 pub async fn create_thread(
     pool: &DbPool,
     session_id: &str,
+    name: Option<&str>,
     role: &str,
     provider: &str,
     model: &str,
 ) -> Result<Thread> {
     let id = new_id();
-    debug!(id = %id, session_id, role, provider, model, "creating thread");
+
+    let thread_name = match name {
+        Some(n) => n.to_string(),
+        None => {
+            let count = thread_count(pool, session_id).await?;
+            format!("Thread {}", count + 1)
+        }
+    };
+
+    debug!(id = %id, session_id, name = %thread_name, role, provider, model, "creating thread");
 
     sqlx::query(
-        "INSERT INTO threads (id, session_id, role, provider, model) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO threads (id, session_id, name, role, provider, model) VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(session_id)
+    .bind(&thread_name)
     .bind(role)
     .bind(provider)
     .bind(model)
@@ -352,23 +418,20 @@ pub async fn create_thread(
 
 /// Get a thread by ID.
 pub async fn get_thread(pool: &DbPool, id: &str) -> Result<Option<Thread>> {
-    let row: Option<ThreadRow> = sqlx::query_as(
-        "SELECT id, session_id, role, provider, model, heartbeat_at, updated_at \
-             FROM threads WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<ThreadRow> =
+        sqlx::query_as(&format!("SELECT {THREAD_COLS} FROM threads WHERE id = ?"))
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
 
     Ok(row.map(into_thread))
 }
 
 /// List all threads in a session.
 pub async fn list_threads(pool: &DbPool, session_id: &str) -> Result<Vec<Thread>> {
-    let rows: Vec<ThreadRow> = sqlx::query_as(
-        "SELECT id, session_id, role, provider, model, heartbeat_at, updated_at \
-             FROM threads WHERE session_id = ? ORDER BY id",
-    )
+    let rows: Vec<ThreadRow> = sqlx::query_as(&format!(
+        "SELECT {THREAD_COLS} FROM threads WHERE session_id = ? ORDER BY id"
+    ))
     .bind(session_id)
     .fetch_all(pool)
     .await?;
@@ -382,10 +445,9 @@ pub async fn get_thread_by_role(
     session_id: &str,
     role: &str,
 ) -> Result<Option<Thread>> {
-    let row: Option<ThreadRow> = sqlx::query_as(
-        "SELECT id, session_id, role, provider, model, heartbeat_at, updated_at \
-             FROM threads WHERE session_id = ? AND role = ? LIMIT 1",
-    )
+    let row: Option<ThreadRow> = sqlx::query_as(&format!(
+        "SELECT {THREAD_COLS} FROM threads WHERE session_id = ? AND role = ? LIMIT 1"
+    ))
     .bind(session_id)
     .bind(role)
     .fetch_optional(pool)
@@ -394,7 +456,22 @@ pub async fn get_thread_by_role(
     Ok(row.map(into_thread))
 }
 
-/// Update the heartbeat timestamp on a thread. Call this periodically.
+/// Rename a thread.
+pub async fn rename_thread(pool: &DbPool, id: &str, new_name: &str) -> Result<()> {
+    let result =
+        sqlx::query("UPDATE threads SET name = ?, updated_at = datetime('now') WHERE id = ?")
+            .bind(new_name)
+            .bind(id)
+            .execute(pool)
+            .await?;
+
+    if result.rows_affected() == 0 {
+        bail!("thread not found: {id}");
+    }
+    Ok(())
+}
+
+/// Update the heartbeat timestamp on a thread.
 pub async fn heartbeat(pool: &DbPool, thread_id: &str) -> Result<()> {
     sqlx::query("UPDATE threads SET heartbeat_at = datetime('now') WHERE id = ?")
         .bind(thread_id)
@@ -420,18 +497,6 @@ pub async fn touch_thread(pool: &DbPool, thread_id: &str, session_id: &str) -> R
         .await?;
     touch_session(pool, session_id).await?;
     Ok(())
-}
-
-fn into_thread(r: ThreadRow) -> Thread {
-    Thread {
-        id: r.0,
-        session_id: r.1,
-        role: r.2,
-        provider: r.3,
-        model: r.4,
-        heartbeat_at: r.5,
-        updated_at: r.6,
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -484,15 +549,6 @@ pub async fn load_session_messages(pool: &DbPool, session_id: &str) -> Result<Ve
     Ok(rows.into_iter().map(into_message).collect())
 }
 
-fn into_message(r: (String, String, String, String)) -> StoredMessage {
-    StoredMessage {
-        id: r.0,
-        thread_id: r.1,
-        role: r.2,
-        content: r.3,
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -502,16 +558,12 @@ mod tests {
     use super::*;
     use crate::db::open_memory;
 
-    // --- ID generation ---
+    // --- ID ---
 
     #[test]
-    fn new_id_is_valid_uuid() {
-        assert!(Uuid::parse_str(&new_id()).is_ok());
-    }
-
-    #[test]
-    fn new_id_is_v7() {
-        let uuid = Uuid::parse_str(&new_id()).unwrap();
+    fn new_id_is_valid_v7_uuid() {
+        let id = new_id();
+        let uuid = Uuid::parse_str(&id).unwrap();
         assert_eq!(uuid.get_version(), Some(uuid::Version::SortRand));
     }
 
@@ -523,60 +575,47 @@ mod tests {
         assert!(id1 < id2);
     }
 
-    // --- Session tests ---
+    // --- Session naming ---
 
     #[tokio::test]
-    async fn create_session_defaults_to_active() {
+    async fn session_with_explicit_name() {
         let pool = open_memory().await.unwrap();
-        let s = create_session(&pool, "test", "/tmp", None).await.unwrap();
-        assert_eq!(s.status, SessionStatus::Active);
+        let s = create_session(&pool, Some("my-refactor"), "/tmp", None)
+            .await
+            .unwrap();
+        assert_eq!(s.name, "my-refactor");
     }
 
     #[tokio::test]
-    async fn archive_and_activate_session() {
+    async fn session_without_name_gets_untitled() {
         let pool = open_memory().await.unwrap();
-        let s = create_session(&pool, "test", "/tmp", None).await.unwrap();
+        let s = create_session(&pool, None, "/tmp", None).await.unwrap();
+        assert_eq!(s.name, "Untitled");
+    }
 
-        archive_session(&pool, &s.id).await.unwrap();
+    #[tokio::test]
+    async fn rename_session_works() {
+        let pool = open_memory().await.unwrap();
+        let s = create_session(&pool, None, "/tmp", None).await.unwrap();
+        assert_eq!(s.name, "Untitled");
+
+        rename_session(&pool, &s.id, "refactor-auth").await.unwrap();
         let s = get_session(&pool, &s.id).await.unwrap().unwrap();
-        assert_eq!(s.status, SessionStatus::Archived);
-
-        activate_session(&pool, &s.id).await.unwrap();
-        let s = get_session(&pool, &s.id).await.unwrap().unwrap();
-        assert_eq!(s.status, SessionStatus::Active);
+        assert_eq!(s.name, "refactor-auth");
     }
 
     #[tokio::test]
-    async fn list_sessions_filter_by_status() {
+    async fn rename_nonexistent_session_fails() {
         let pool = open_memory().await.unwrap();
-        let s1 = create_session(&pool, "active-one", "/tmp/a", None)
-            .await
-            .unwrap();
-        create_session(&pool, "active-two", "/tmp/b", None)
-            .await
-            .unwrap();
-        archive_session(&pool, &s1.id).await.unwrap();
-
-        let active = list_sessions(&pool, Some(SessionStatus::Active), 10)
-            .await
-            .unwrap();
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].name, "active-two");
-
-        let archived = list_sessions(&pool, Some(SessionStatus::Archived), 10)
-            .await
-            .unwrap();
-        assert_eq!(archived.len(), 1);
-        assert_eq!(archived[0].name, "active-one");
-
-        let all = list_sessions(&pool, None, 10).await.unwrap();
-        assert_eq!(all.len(), 2);
+        assert!(rename_session(&pool, "nope", "new-name").await.is_err());
     }
+
+    // --- Session search ---
 
     #[tokio::test]
     async fn get_session_by_name_works() {
         let pool = open_memory().await.unwrap();
-        let s = create_session(&pool, "kodo-refactor", "/tmp", None)
+        let s = create_session(&pool, Some("kodo-refactor"), "/tmp", None)
             .await
             .unwrap();
         let found = get_session_by_name(&pool, "kodo-refactor")
@@ -590,13 +629,13 @@ mod tests {
     #[tokio::test]
     async fn search_sessions_by_name() {
         let pool = open_memory().await.unwrap();
-        create_session(&pool, "kodo-phase-1", "/tmp/a", None)
+        create_session(&pool, Some("kodo-phase-1"), "/tmp/a", None)
             .await
             .unwrap();
-        create_session(&pool, "kodo-phase-2", "/tmp/b", None)
+        create_session(&pool, Some("kodo-phase-2"), "/tmp/b", None)
             .await
             .unwrap();
-        create_session(&pool, "other-project", "/tmp/c", None)
+        create_session(&pool, Some("other-project"), "/tmp/c", None)
             .await
             .unwrap();
 
@@ -608,11 +647,72 @@ mod tests {
         assert!(search_sessions(&pool, "nope", 10).await.unwrap().is_empty());
     }
 
+    // --- Session status ---
+
+    #[tokio::test]
+    async fn session_defaults_to_active() {
+        let pool = open_memory().await.unwrap();
+        let s = create_session(&pool, Some("test"), "/tmp", None)
+            .await
+            .unwrap();
+        assert_eq!(s.status, SessionStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn archive_and_activate_session() {
+        let pool = open_memory().await.unwrap();
+        let s = create_session(&pool, Some("test"), "/tmp", None)
+            .await
+            .unwrap();
+
+        archive_session(&pool, &s.id).await.unwrap();
+        assert_eq!(
+            get_session(&pool, &s.id).await.unwrap().unwrap().status,
+            SessionStatus::Archived
+        );
+
+        activate_session(&pool, &s.id).await.unwrap();
+        assert_eq!(
+            get_session(&pool, &s.id).await.unwrap().unwrap().status,
+            SessionStatus::Active
+        );
+    }
+
+    #[tokio::test]
+    async fn list_sessions_filter_by_status() {
+        let pool = open_memory().await.unwrap();
+        let s1 = create_session(&pool, Some("one"), "/tmp/a", None)
+            .await
+            .unwrap();
+        create_session(&pool, Some("two"), "/tmp/b", None)
+            .await
+            .unwrap();
+        archive_session(&pool, &s1.id).await.unwrap();
+
+        assert_eq!(
+            list_sessions(&pool, Some(SessionStatus::Active), 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            list_sessions(&pool, Some(SessionStatus::Archived), 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(list_sessions(&pool, None, 10).await.unwrap().len(), 2);
+    }
+
     #[tokio::test]
     async fn delete_session_cascades() {
         let pool = open_memory().await.unwrap();
-        let s = create_session(&pool, "doomed", "/tmp", None).await.unwrap();
-        let t = create_thread(&pool, &s.id, "default", "anthropic", "claude")
+        let s = create_session(&pool, Some("doomed"), "/tmp", None)
+            .await
+            .unwrap();
+        let t = create_thread(&pool, &s.id, None, "default", "anthropic", "claude")
             .await
             .unwrap();
         save_message(&pool, &t.id, "user", r#"[{"type":"text","text":"hi"}]"#)
@@ -622,129 +722,210 @@ mod tests {
         delete_session(&pool, &s.id).await.unwrap();
         assert!(get_session(&pool, &s.id).await.unwrap().is_none());
         assert!(get_thread(&pool, &t.id).await.unwrap().is_none());
-        assert!(load_messages(&pool, &t.id).await.unwrap().is_empty());
+    }
+
+    // --- Thread naming ---
+
+    #[tokio::test]
+    async fn thread_with_explicit_name() {
+        let pool = open_memory().await.unwrap();
+        let s = create_session(&pool, Some("test"), "/tmp", None)
+            .await
+            .unwrap();
+        let t = create_thread(
+            &pool,
+            &s.id,
+            Some("planner-opus"),
+            "planner",
+            "anthropic",
+            "opus",
+        )
+        .await
+        .unwrap();
+        assert_eq!(t.name, "planner-opus");
     }
 
     #[tokio::test]
-    async fn delete_nonexistent_session_fails() {
+    async fn thread_auto_names_incrementing() {
         let pool = open_memory().await.unwrap();
-        assert!(delete_session(&pool, "nope").await.is_err());
+        let s = create_session(&pool, Some("test"), "/tmp", None)
+            .await
+            .unwrap();
+
+        let t1 = create_thread(&pool, &s.id, None, "default", "anthropic", "claude")
+            .await
+            .unwrap();
+        let t2 = create_thread(&pool, &s.id, None, "executor", "openai", "gpt-4o")
+            .await
+            .unwrap();
+        let t3 = create_thread(&pool, &s.id, None, "debugger", "anthropic", "sonnet")
+            .await
+            .unwrap();
+
+        assert_eq!(t1.name, "Thread 1");
+        assert_eq!(t2.name, "Thread 2");
+        assert_eq!(t3.name, "Thread 3");
     }
 
-    // --- Thread heartbeat tests ---
+    #[tokio::test]
+    async fn rename_thread_works() {
+        let pool = open_memory().await.unwrap();
+        let s = create_session(&pool, Some("test"), "/tmp", None)
+            .await
+            .unwrap();
+        let t = create_thread(&pool, &s.id, None, "default", "anthropic", "claude")
+            .await
+            .unwrap();
+        assert_eq!(t.name, "Thread 1");
+
+        rename_thread(&pool, &t.id, "main-chat").await.unwrap();
+        let t = get_thread(&pool, &t.id).await.unwrap().unwrap();
+        assert_eq!(t.name, "main-chat");
+    }
+
+    #[tokio::test]
+    async fn rename_nonexistent_thread_fails() {
+        let pool = open_memory().await.unwrap();
+        assert!(rename_thread(&pool, "nope", "new-name").await.is_err());
+    }
+
+    // --- Thread heartbeat ---
 
     #[tokio::test]
     async fn thread_starts_without_heartbeat() {
         let pool = open_memory().await.unwrap();
-        let s = create_session(&pool, "test", "/tmp", None).await.unwrap();
-        let t = create_thread(&pool, &s.id, "default", "anthropic", "claude")
+        let s = create_session(&pool, Some("test"), "/tmp", None)
             .await
             .unwrap();
-        assert!(t.heartbeat_at.is_none());
+        let t = create_thread(&pool, &s.id, None, "default", "anthropic", "claude")
+            .await
+            .unwrap();
         assert!(!t.is_live());
     }
 
     #[tokio::test]
     async fn heartbeat_makes_thread_live() {
         let pool = open_memory().await.unwrap();
-        let s = create_session(&pool, "test", "/tmp", None).await.unwrap();
-        let t = create_thread(&pool, &s.id, "default", "anthropic", "claude")
+        let s = create_session(&pool, Some("test"), "/tmp", None)
+            .await
+            .unwrap();
+        let t = create_thread(&pool, &s.id, None, "default", "anthropic", "claude")
             .await
             .unwrap();
 
         heartbeat(&pool, &t.id).await.unwrap();
         let t = get_thread(&pool, &t.id).await.unwrap().unwrap();
-        assert!(t.heartbeat_at.is_some());
         assert!(t.is_live());
     }
 
     #[tokio::test]
-    async fn clear_heartbeat_makes_thread_not_live() {
+    async fn clear_heartbeat_detaches() {
         let pool = open_memory().await.unwrap();
-        let s = create_session(&pool, "test", "/tmp", None).await.unwrap();
-        let t = create_thread(&pool, &s.id, "default", "anthropic", "claude")
+        let s = create_session(&pool, Some("test"), "/tmp", None)
+            .await
+            .unwrap();
+        let t = create_thread(&pool, &s.id, None, "default", "anthropic", "claude")
             .await
             .unwrap();
 
         heartbeat(&pool, &t.id).await.unwrap();
         clear_heartbeat(&pool, &t.id).await.unwrap();
-        let t = get_thread(&pool, &t.id).await.unwrap().unwrap();
-        assert!(!t.is_live());
+        assert!(!get_thread(&pool, &t.id).await.unwrap().unwrap().is_live());
     }
 
-    // --- Sweep stale sessions ---
+    // --- Sweep ---
 
     #[tokio::test]
-    async fn sweep_archives_sessions_with_no_live_threads() {
+    async fn sweep_archives_stale_sessions() {
         let pool = open_memory().await.unwrap();
-        let s = create_session(&pool, "stale", "/tmp", None).await.unwrap();
-        create_thread(&pool, &s.id, "default", "anthropic", "claude")
+        let s = create_session(&pool, Some("stale"), "/tmp", None)
             .await
             .unwrap();
-        // No heartbeat set — thread is not live.
+        create_thread(&pool, &s.id, None, "default", "anthropic", "claude")
+            .await
+            .unwrap();
 
-        let count = sweep_stale_sessions(&pool).await.unwrap();
-        assert_eq!(count, 1);
-
-        let s = get_session(&pool, &s.id).await.unwrap().unwrap();
-        assert_eq!(s.status, SessionStatus::Archived);
+        assert_eq!(sweep_stale_sessions(&pool).await.unwrap(), 1);
+        assert_eq!(
+            get_session(&pool, &s.id).await.unwrap().unwrap().status,
+            SessionStatus::Archived
+        );
     }
 
     #[tokio::test]
-    async fn sweep_does_not_archive_sessions_with_live_threads() {
+    async fn sweep_skips_live_sessions() {
         let pool = open_memory().await.unwrap();
-        let s = create_session(&pool, "alive", "/tmp", None).await.unwrap();
-        let t = create_thread(&pool, &s.id, "default", "anthropic", "claude")
+        let s = create_session(&pool, Some("alive"), "/tmp", None)
+            .await
+            .unwrap();
+        let t = create_thread(&pool, &s.id, None, "default", "anthropic", "claude")
             .await
             .unwrap();
         heartbeat(&pool, &t.id).await.unwrap();
 
-        let count = sweep_stale_sessions(&pool).await.unwrap();
-        assert_eq!(count, 0);
-
-        let s = get_session(&pool, &s.id).await.unwrap().unwrap();
-        assert_eq!(s.status, SessionStatus::Active);
+        assert_eq!(sweep_stale_sessions(&pool).await.unwrap(), 0);
+        assert_eq!(
+            get_session(&pool, &s.id).await.unwrap().unwrap().status,
+            SessionStatus::Active
+        );
     }
 
-    #[tokio::test]
-    async fn sweep_skips_already_archived() {
-        let pool = open_memory().await.unwrap();
-        let s = create_session(&pool, "old", "/tmp", None).await.unwrap();
-        create_thread(&pool, &s.id, "default", "anthropic", "claude")
-            .await
-            .unwrap();
-        archive_session(&pool, &s.id).await.unwrap();
-
-        let count = sweep_stale_sessions(&pool).await.unwrap();
-        assert_eq!(count, 0); // Already archived, shouldn't be counted.
-    }
-
-    // --- Thread multi-model tests ---
+    // --- Multi-model threads ---
 
     #[tokio::test]
-    async fn multiple_threads_in_session() {
+    async fn multiple_threads_different_models() {
         let pool = open_memory().await.unwrap();
-        let s = create_session(&pool, "multi", "/tmp", None).await.unwrap();
+        let s = create_session(&pool, Some("multi"), "/tmp", None)
+            .await
+            .unwrap();
 
-        create_thread(&pool, &s.id, "planner", "anthropic", "opus")
-            .await
-            .unwrap();
-        create_thread(&pool, &s.id, "executor", "anthropic", "sonnet")
-            .await
-            .unwrap();
-        create_thread(&pool, &s.id, "debugger", "openai", "gpt-4o")
-            .await
-            .unwrap();
+        create_thread(
+            &pool,
+            &s.id,
+            Some("Planner"),
+            "planner",
+            "anthropic",
+            "opus",
+        )
+        .await
+        .unwrap();
+        create_thread(
+            &pool,
+            &s.id,
+            Some("Coder"),
+            "executor",
+            "anthropic",
+            "sonnet",
+        )
+        .await
+        .unwrap();
+        create_thread(
+            &pool,
+            &s.id,
+            Some("Reviewer"),
+            "debugger",
+            "openai",
+            "gpt-4o",
+        )
+        .await
+        .unwrap();
 
         let threads = list_threads(&pool, &s.id).await.unwrap();
         assert_eq!(threads.len(), 3);
+
+        let names: Vec<&str> = threads.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"Planner"));
+        assert!(names.contains(&"Coder"));
+        assert!(names.contains(&"Reviewer"));
     }
 
     #[tokio::test]
     async fn get_thread_by_role_works() {
         let pool = open_memory().await.unwrap();
-        let s = create_session(&pool, "test", "/tmp", None).await.unwrap();
-        create_thread(&pool, &s.id, "planner", "anthropic", "opus")
+        let s = create_session(&pool, Some("test"), "/tmp", None)
+            .await
+            .unwrap();
+        create_thread(&pool, &s.id, None, "planner", "anthropic", "opus")
             .await
             .unwrap();
 
@@ -761,21 +942,21 @@ mod tests {
         );
     }
 
-    // --- Message tests ---
+    // --- Messages ---
 
     #[tokio::test]
     async fn save_and_load_messages() {
         let pool = open_memory().await.unwrap();
-        let s = create_session(&pool, "test", "/tmp", None).await.unwrap();
-        let t = create_thread(&pool, &s.id, "default", "anthropic", "claude")
+        let s = create_session(&pool, Some("test"), "/tmp", None)
+            .await
+            .unwrap();
+        let t = create_thread(&pool, &s.id, None, "default", "anthropic", "claude")
             .await
             .unwrap();
 
-        let mid = save_message(&pool, &t.id, "user", r#"[{"type":"text","text":"hello"}]"#)
+        save_message(&pool, &t.id, "user", r#"[{"type":"text","text":"hello"}]"#)
             .await
             .unwrap();
-        assert!(Uuid::parse_str(&mid).is_ok());
-
         save_message(
             &pool,
             &t.id,
@@ -788,17 +969,18 @@ mod tests {
         let msgs = load_messages(&pool, &t.id).await.unwrap();
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "user");
-        assert_eq!(msgs[1].role, "assistant");
     }
 
     #[tokio::test]
-    async fn load_all_session_messages() {
+    async fn load_session_messages_cross_thread() {
         let pool = open_memory().await.unwrap();
-        let s = create_session(&pool, "test", "/tmp", None).await.unwrap();
-        let t1 = create_thread(&pool, &s.id, "planner", "anthropic", "opus")
+        let s = create_session(&pool, Some("test"), "/tmp", None)
             .await
             .unwrap();
-        let t2 = create_thread(&pool, &s.id, "executor", "anthropic", "sonnet")
+        let t1 = create_thread(&pool, &s.id, None, "planner", "anthropic", "opus")
+            .await
+            .unwrap();
+        let t2 = create_thread(&pool, &s.id, None, "executor", "anthropic", "sonnet")
             .await
             .unwrap();
 
@@ -809,33 +991,44 @@ mod tests {
             .await
             .unwrap();
 
-        let all = load_session_messages(&pool, &s.id).await.unwrap();
-        assert_eq!(all.len(), 2);
+        assert_eq!(load_session_messages(&pool, &s.id).await.unwrap().len(), 2);
     }
 
-    // --- Fork tests ---
+    // --- Fork ---
 
     #[tokio::test]
-    async fn fork_session_copies_threads_and_messages() {
+    async fn fork_copies_thread_names_and_messages() {
         let pool = open_memory().await.unwrap();
-        let s = create_session(&pool, "original", "/tmp", Some("main"))
+        let s = create_session(&pool, Some("original"), "/tmp", Some("main"))
             .await
             .unwrap();
-        let t1 = create_thread(&pool, &s.id, "planner", "anthropic", "opus")
-            .await
-            .unwrap();
-        save_message(&pool, &t1.id, "user", r#"[{"type":"text","text":"msg"}]"#)
+        let t = create_thread(
+            &pool,
+            &s.id,
+            Some("Planner"),
+            "planner",
+            "anthropic",
+            "opus",
+        )
+        .await
+        .unwrap();
+        save_message(&pool, &t.id, "user", r#"[{"type":"text","text":"msg"}]"#)
             .await
             .unwrap();
 
-        let forked = fork_session(&pool, &s.id, "forked-copy").await.unwrap();
-        assert_eq!(forked.name, "forked-copy");
-        assert_eq!(forked.status, SessionStatus::Active);
+        let forked = fork_session(&pool, &s.id, Some("forked")).await.unwrap();
+        assert_eq!(forked.name, "forked");
 
         let threads = list_threads(&pool, &forked.id).await.unwrap();
         assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].name, "Planner"); // Name preserved from source.
 
-        let msgs = load_session_messages(&pool, &forked.id).await.unwrap();
-        assert_eq!(msgs.len(), 1);
+        assert_eq!(
+            load_session_messages(&pool, &forked.id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

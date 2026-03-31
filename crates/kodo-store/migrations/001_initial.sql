@@ -16,10 +16,12 @@ CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 
 -- Threads: a conversation track within a session.
 -- heartbeat_at is updated periodically by the attached process.
--- A thread is "live" if heartbeat_at is within the staleness threshold.
+-- A thread is live if heartbeat_at is within the staleness threshold.
+-- name is a human-friendly label, auto-generated as Thread N if not set.
 CREATE TABLE IF NOT EXISTS threads (
     id            TEXT PRIMARY KEY,
     session_id    TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
     role          TEXT NOT NULL DEFAULT 'default',
     provider      TEXT NOT NULL,
     model         TEXT NOT NULL,

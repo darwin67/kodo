@@ -86,19 +86,21 @@ pub async fn open_memory() -> Result<DbPool> {
 
 /// Run SQL migrations.
 async fn run_migrations(pool: &DbPool) -> Result<()> {
+    // Strip comments first (before splitting by semicolons, since
+    // comments may contain semicolons).
+    let stripped: String = MIGRATIONS_SQL
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
     // Split by semicolons and execute each statement.
-    for statement in MIGRATIONS_SQL.split(';') {
-        // Strip comments and whitespace.
-        let lines: Vec<&str> = statement
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty() && !l.starts_with("--"))
-            .collect();
-        let stmt = lines.join("\n");
+    for statement in stripped.split(';') {
+        let stmt = statement.trim();
         if stmt.is_empty() {
             continue;
         }
-        sqlx::query(&stmt)
+        sqlx::query(stmt)
             .execute(pool)
             .await
             .with_context(|| format!("migration failed: {}", &stmt[..stmt.len().min(80)]))?;
