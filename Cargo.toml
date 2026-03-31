@@ -60,8 +60,11 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
 glob = "0.3"
 regex = "1"
 
+# Keychain
+keyring = { version = "3", features = ["apple-native", "linux-native"] }
+
 # Misc
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v7"] }
 chrono = { version = "0.4", features = ["serde"] }
 pin-project-lite = "0.2"
 
