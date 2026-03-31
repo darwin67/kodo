@@ -305,7 +305,7 @@ pub async fn fork_session(
         .await?
         .ok_or_else(|| anyhow::anyhow!("source session not found: {source_id}"))?;
 
-    let fork_name = new_name.unwrap_or_else(|| "Untitled");
+    let fork_name = new_name.unwrap_or("Untitled");
     let new_session = create_session(
         pool,
         Some(fork_name),
