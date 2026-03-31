@@ -1,5 +1,5 @@
 [package]
-name = "kodo-tui"
+name = "kodo-ui"
 version.workspace = true
 edition.workspace = true
 
@@ -8,5 +8,8 @@ kodo-core = { workspace = true }
 kodo-llm = { workspace = true }
 
 tokio = { workspace = true }
+futures = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+crossterm = { workspace = true }
+ratatui = { workspace = true }

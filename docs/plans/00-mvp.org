@@ -361,15 +361,15 @@ Remember conversations across restarts.
 
 Upgrade from readline to a proper terminal UI.
 
-- [ ] Ratatui app scaffold: event loop, terminal setup/teardown
-- [ ] Layout: input panel (bottom), output panel (scrollable), status bar
-- [ ] Streaming output rendering with markdown support
+- [X] Ratatui app scaffold: event loop, terminal setup/teardown
+- [X] Layout: input panel (bottom), output panel (scrollable), status bar
+- [X] Streaming output rendering with markdown support
 - [ ] Syntax highlighting for code blocks
-- [ ] Command palette (~Ctrl+K~): modal overlay, fuzzy search, command dispatch
+- [X] Command palette (~Ctrl+K~): modal overlay, fuzzy search, command dispatch
 - [ ] Keybind system: registry, customizable mappings, leader key support
-- [ ] Theme system: built-in dark/light themes, switchable via palette
-- [ ] Status bar: current mode, model, provider, token usage, session info
-- [ ] Mode toggle via palette or keybind
+- [X] Theme system: built-in dark/light themes, switchable via palette
+- [X] Status bar: current mode, model, provider, token usage, session info
+- [X] Mode toggle via palette or keybind
 
 ** Phase 7 — LSP Integration
 

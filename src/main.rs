@@ -1,16 +1,22 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::Parser;
+use tokio::sync::mpsc;
 
-use kodo_core::agent::Agent;
-use kodo_core::mode::Mode;
+use kodo_core::agent::{Agent, AgentEvent};
 use kodo_llm::anthropic::AnthropicProvider;
 use kodo_llm::gemini::GeminiProvider;
 use kodo_llm::ollama::OllamaProvider;
 use kodo_llm::openai::OpenAiProvider;
 use kodo_llm::provider::Provider;
-use kodo_tui::terminal::read_user_input;
+use kodo_ui::command::Command;
+use kodo_ui::event::{EventHandler, map_event};
+use kodo_ui::message::Message;
+use kodo_ui::model::Model;
+use kodo_ui::tui::{init_terminal, restore_terminal, view};
+use kodo_ui::update::update;
 
 #[derive(Parser)]
 #[command(name = "kodo", about = "A coding agent for your terminal")]
@@ -22,13 +28,13 @@ struct Cli {
     /// Provider to use: anthropic, openai, gemini, ollama
     #[arg(long, short)]
     provider: Option<String>,
+
+    /// Enable debug mode (shows debug side panel with Ctrl+\)
+    #[arg(long)]
+    debug: bool,
 }
 
-/// Create a provider by name.
 fn create_provider(name: &str) -> Result<Arc<dyn Provider>> {
-    // TODO
-    // credentials should be able to be set on run time and stored.
-    // and future processes/sessions will be able to reuse those crede
     match name {
         "anthropic" => Ok(Arc::new(AnthropicProvider::from_env()?)),
         "openai" => Ok(Arc::new(OpenAiProvider::from_env()?)),
@@ -38,7 +44,6 @@ fn create_provider(name: &str) -> Result<Arc<dyn Provider>> {
     }
 }
 
-/// Return the default model for a given provider name.
 fn default_model(provider_name: &str) -> &str {
     match provider_name {
         "anthropic" => "claude-sonnet-4-20250514",
@@ -49,155 +54,155 @@ fn default_model(provider_name: &str) -> &str {
     }
 }
 
+/// Messages sent from the TUI event loop to the agent task.
+/// Agent communication types
+#[derive(Debug)]
+enum AgentRequest {
+    ProcessMessage(String),
+    Quit,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing (respects RUST_LOG env var).
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .with_target(false)
+        .with_writer(std::io::stderr) // Log to stderr, not stdout (TUI owns stdout).
         .init();
 
     let cli = Cli::parse();
 
-    // Determine provider.
     let provider_name = cli.provider.as_deref().unwrap_or("anthropic");
     let provider = create_provider(provider_name)?;
-
-    // Determine model.
     let model = cli
         .model
         .unwrap_or_else(|| default_model(provider_name).to_string());
 
-    // Build the agent.
     let mut agent = Agent::new(provider).with_model(&model);
-
-    // Register built-in tools.
     kodo_tools::register_builtin_tools(agent.tool_registry_mut());
 
-    println!("kodo v{}", env!("CARGO_PKG_VERSION"));
-    println!(
-        "Provider: {} | Model: {}",
-        agent.provider_name(),
-        agent.model()
-    );
-    println!("Type your message and press Enter. Ctrl+D to exit.\n");
+    // Initialize terminal
+    let mut terminal = init_terminal()?;
+    let mut events = EventHandler::new(Duration::from_millis(100));
 
-    // Main REPL loop.
-    loop {
-        let prompt = format!("[{}] > ", agent.mode);
-        let input = match read_user_input(&prompt) {
-            Ok(Some(input)) => input,
-            Ok(None) => continue,
-            Err(_) => break, // EOF or error
-        };
+    // Initialize application state (Model) following Elm Architecture
+    let mut model = Model::new(cli.debug);
+    model.provider = agent.provider_name().to_string();
+    model.model_name = agent.model().to_string();
+    model.mode = agent.mode.to_string();
 
-        if input == "/quit" || input == "/exit" {
-            break;
-        }
-
-        if input == "/mode" || input == "/mode plan" || input == "/mode build" {
-            match input.as_str() {
-                "/mode plan" => {
-                    agent.mode = Mode::Plan;
-                    println!("Switched to plan mode (read-only).\n");
-                }
-                "/mode build" => {
-                    agent.mode = Mode::Build;
-                    println!("Switched to build mode.\n");
-                }
-                _ => {
-                    println!("Current mode: {}", agent.mode);
-                    println!("  /mode plan   — read-only (search, read, web fetch)");
-                    println!("  /mode build  — full execution (all tools)\n");
-                }
-            }
-            continue;
-        }
-
-        if input.starts_with("/model") {
-            let parts: Vec<&str> = input.splitn(3, ' ').collect();
-            match parts.len() {
-                1 => {
-                    // /model — show current
-                    println!(
-                        "Provider: {} | Model: {}",
-                        agent.provider_name(),
-                        agent.model()
-                    );
-                    println!("  /model <name>              — switch model");
-                    println!("  /model <provider> <name>   — switch provider and model");
-                    println!("  Available providers: anthropic, openai, gemini, ollama\n");
-                }
-                2 => {
-                    // /model <name> — switch model only
-                    agent.set_model(parts[1]);
-                    println!("Model set to: {}\n", agent.model());
-                }
-                3 => {
-                    // /model <provider> <name> — switch provider + model
-                    match create_provider(parts[1]) {
-                        Ok(new_provider) => {
-                            agent.set_provider(new_provider);
-                            agent.set_model(parts[2]);
-                            println!(
-                                "Switched to {} / {} (conversation cleared)\n",
-                                agent.provider_name(),
-                                agent.model()
-                            );
-                        }
-                        Err(e) => println!("Error: {e}\n"),
-                    }
-                }
-                _ => unreachable!(),
-            }
-            continue;
-        }
-
-        if input == "/undo" {
-            match agent.undo().await {
-                Ok(msg) => println!("{msg}\n"),
-                Err(e) => println!("Cannot undo: {e}\n"),
-            }
-            continue;
-        }
-
-        // TODO this will be replaced by modal operations on the TUI/GUI
-        if input == "/tools" {
-            let registry = agent.tool_registry();
-            if registry.is_empty() {
-                println!("No tools registered.");
-            } else {
-                println!("Registered tools ({}):\n", registry.len());
-                let mut tools: Vec<_> = registry.iter().collect();
-                tools.sort_by_key(|t| t.name());
-                for tool in tools {
-                    println!(
-                        "  {:<20} [{:?}]  {}",
-                        tool.name(),
-                        tool.permission_level(),
-                        tool.description()
-                    );
-                }
-            }
-            println!();
-            continue;
-        }
-
-        if let Err(e) = agent.process_message(&input).await {
-            eprintln!("\nerror: {e:#}");
-        }
-
-        println!();
+    if cli.debug {
+        model.debug_panel_open = true;
+        model
+            .debug_logs
+            .push("Debug mode enabled. Toggle panel with F12".to_string());
     }
 
-    let ctx = agent.context();
-    println!(
-        "\nSession stats: {} input tokens, {} output tokens",
-        ctx.total_input_tokens, ctx.total_output_tokens
-    );
+    // Channel for agent events -> TUI
+    let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
+    // Channel for TUI -> agent requests
+    let (req_tx, mut req_rx) = mpsc::unbounded_channel::<AgentRequest>();
 
+    // Spawn agent task
+    let agent_event_tx = agent_tx.clone();
+    tokio::spawn(async move {
+        while let Some(request) = req_rx.recv().await {
+            match request {
+                AgentRequest::ProcessMessage(input) => {
+                    if let Err(e) = agent.process_message(&input, Some(&agent_event_tx)).await {
+                        let _ = agent_event_tx.send(AgentEvent::Error(format!("{e:#}")));
+                    }
+                    // Always send Done so the TUI knows processing finished
+                    let _ = agent_event_tx.send(AgentEvent::Done);
+                }
+                AgentRequest::Quit => break,
+            }
+        }
+    });
+
+    // Main MVU (Model-View-Update) runtime loop following Elm Architecture
+    loop {
+        // VIEW: Render current model state
+        terminal.draw(|frame| view(frame, &model))?;
+
+        // HANDLE EVENTS: Process input and agent events
+        tokio::select! {
+            // Terminal/keyboard events -> Messages -> Update
+            event_result = events.next() => {
+                let event = event_result?;
+
+                // Map crossterm Event to application Message
+                if let Some(message) = map_event(&event, &model) {
+                    // UPDATE: Pure function that modifies model and returns commands
+                    let commands = update(&mut model, message);
+
+                    // EXECUTE COMMANDS: Handle side effects
+                    for command in commands {
+                        execute_command(command, &req_tx).await;
+                    }
+                }
+            }
+
+            // Agent events -> Messages -> Update
+            Some(agent_event) = agent_rx.recv() => {
+                // Map AgentEvent to application Message
+                let message = map_agent_event(agent_event);
+
+                // UPDATE: Pure function that modifies model and returns commands
+                let commands = update(&mut model, message);
+
+                // EXECUTE COMMANDS: Handle side effects
+                for command in commands {
+                    execute_command(command, &req_tx).await;
+                }
+            }
+        }
+
+        // Check if application should quit
+        if model.should_quit {
+            let _ = req_tx.send(AgentRequest::Quit);
+            break;
+        }
+    }
+
+    // Cleanup: Restore terminal to normal mode
+    restore_terminal(&mut terminal)?;
     Ok(())
+}
+
+/// Execute Commands returned by update() - this is where side effects happen.
+/// The update() function is pure, but Commands describe side effects that
+/// the runtime must perform (sending messages to agents, quitting, etc).
+async fn execute_command(command: Command, req_tx: &mpsc::UnboundedSender<AgentRequest>) {
+    match command {
+        Command::SendToAgent(message) => {
+            let _ = req_tx.send(AgentRequest::ProcessMessage(message));
+        }
+        Command::Quit => {
+            let _ = req_tx.send(AgentRequest::Quit);
+        }
+        Command::None => {
+            // No-op
+        }
+    }
+}
+
+/// Map AgentEvent to application Message.
+/// This converts external agent events into internal application messages
+/// that can be processed by the pure update() function.
+fn map_agent_event(event: AgentEvent) -> Message {
+    match event {
+        AgentEvent::TextDelta(chunk) => Message::AgentTextDelta(chunk),
+        AgentEvent::TextDone => Message::AgentTextDone,
+        AgentEvent::ToolStart { name } => Message::AgentToolStart { name },
+        AgentEvent::ToolDone { name, success } => Message::AgentToolDone { name, success },
+        AgentEvent::ToolDenied { name, reason } => Message::AgentToolDenied { name, reason },
+        AgentEvent::ToolCancelled { name } => Message::AgentToolCancelled { name },
+        AgentEvent::Formatted { message } => Message::AgentFormatted { message },
+        AgentEvent::Error(error) => Message::AgentError(error),
+        AgentEvent::Done => Message::AgentDone,
+    }
 }

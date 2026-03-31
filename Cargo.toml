@@ -3,7 +3,7 @@ members = [
     "crates/kodo-core",
     "crates/kodo-llm",
     "crates/kodo-tools",
-    "crates/kodo-tui",
+    "crates/kodo-ui",
     "crates/kodo-store",
     "crates/kodo-lsp",
     "crates/kodo-fmt",
@@ -20,7 +20,7 @@ license = "MIT"
 kodo-core = { path = "crates/kodo-core" }
 kodo-llm = { path = "crates/kodo-llm" }
 kodo-tools = { path = "crates/kodo-tools" }
-kodo-tui = { path = "crates/kodo-tui" }
+kodo-ui = { path = "crates/kodo-ui" }
 kodo-store = { path = "crates/kodo-store" }
 kodo-lsp = { path = "crates/kodo-lsp" }
 kodo-fmt = { path = "crates/kodo-fmt" }
@@ -77,7 +77,7 @@ edition.workspace = true
 kodo-core = { workspace = true }
 kodo-llm = { workspace = true }
 kodo-tools = { workspace = true }
-kodo-tui = { workspace = true }
+kodo-ui = { workspace = true }
 kodo-store = { workspace = true }
 kodo-lsp = { workspace = true }
 kodo-fmt = { workspace = true }
