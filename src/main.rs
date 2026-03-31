@@ -25,6 +25,10 @@ struct Cli {
     /// Provider to use: anthropic, openai, gemini, ollama
     #[arg(long, short)]
     provider: Option<String>,
+
+    /// Enable debug mode (shows debug side panel with Ctrl+\)
+    #[arg(long)]
+    debug: bool,
 }
 
 fn create_provider(name: &str) -> Result<Arc<dyn Provider>> {
@@ -83,6 +87,11 @@ async fn main() -> Result<()> {
     tui_app.provider = agent.provider_name().to_string();
     tui_app.model = agent.model().to_string();
     tui_app.mode = agent.mode.to_string();
+    tui_app.debug_mode = cli.debug;
+    if cli.debug {
+        tui_app.debug_panel_open = true;
+        tui_app.push_debug_log("Debug mode enabled. Toggle panel with Ctrl+\\");
+    }
 
     // Channel for agent events -> TUI.
     let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -136,8 +145,13 @@ async fn main() -> Result<()> {
                             ChatRole::System,
                             format!("Switched to {new_mode} mode."),
                         );
+                        tui_app.push_debug_log(format!("Mode toggled to {new_mode}"));
+                    }
+                    Action::ToggleDebugPanel => {
+                        tui_app.debug_panel_open = !tui_app.debug_panel_open;
                     }
                     Action::PaletteCommand(cmd) => {
+                        tui_app.push_debug_log(format!("Palette command: {cmd}"));
                         handle_palette_command(&mut tui_app, &cmd);
                     }
                     Action::None => {}
@@ -145,6 +159,9 @@ async fn main() -> Result<()> {
             }
             // Agent events (streaming text, tool status, etc.).
             Some(agent_event) = agent_rx.recv() => {
+                // Log all agent events to debug panel.
+                tui_app.push_debug_log(format!("{agent_event:?}"));
+
                 match agent_event {
                     AgentEvent::TextDelta(text) => {
                         tui_app.append_streaming(&text);
@@ -173,7 +190,6 @@ async fn main() -> Result<()> {
                         tui_app.is_streaming = false;
                     }
                     AgentEvent::Done => {
-                        // If there's still streaming text, finalize it.
                         if tui_app.is_streaming {
                             tui_app.finish_streaming();
                         }

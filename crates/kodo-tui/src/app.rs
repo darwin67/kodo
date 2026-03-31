@@ -67,6 +67,14 @@ pub struct App {
     pub palette_query: String,
     /// Command palette selected index.
     pub palette_selected: usize,
+    /// Whether debug mode is enabled (--debug flag).
+    pub debug_mode: bool,
+    /// Whether the debug side panel is visible.
+    pub debug_panel_open: bool,
+    /// Debug log entries.
+    pub debug_logs: Vec<String>,
+    /// Scroll offset for the debug panel.
+    pub debug_scroll: u16,
 }
 
 impl App {
@@ -91,6 +99,10 @@ impl App {
             palette_open: false,
             palette_query: String::new(),
             palette_selected: 0,
+            debug_mode: false,
+            debug_panel_open: false,
+            debug_logs: Vec::new(),
+            debug_scroll: 0,
         }
     }
 
@@ -106,6 +118,14 @@ impl App {
     /// Append text to the current streaming buffer.
     pub fn append_streaming(&mut self, text: &str) {
         self.streaming_text.push_str(text);
+    }
+
+    /// Push a debug log entry. Only takes effect when debug mode is enabled.
+    pub fn push_debug_log(&mut self, msg: impl Into<String>) {
+        if self.debug_mode {
+            self.debug_logs.push(msg.into());
+            self.debug_scroll = 0;
+        }
     }
 
     /// Finalize streaming: move buffer to messages.
@@ -156,7 +176,18 @@ pub fn restore_terminal(terminal: &mut Tui) -> Result<()> {
 pub fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    // Layout: status bar (1 line) at top, input (3 lines) at bottom, output fills middle.
+    // Optionally split the screen for the debug side panel.
+    let (main_area, debug_area) = if app.debug_mode && app.debug_panel_open {
+        let h_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+            .split(area);
+        (h_chunks[0], Some(h_chunks[1]))
+    } else {
+        (area, None)
+    };
+
+    // Main layout: status bar (1 line) at top, input (3 lines) at bottom, output fills middle.
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -164,11 +195,16 @@ pub fn render(frame: &mut Frame, app: &App) {
             Constraint::Min(1),    // Output/chat area
             Constraint::Length(3), // Input area
         ])
-        .split(area);
+        .split(main_area);
 
     render_status_bar(frame, app, chunks[0]);
     render_output(frame, app, chunks[1]);
     render_input(frame, app, chunks[2]);
+
+    // Debug side panel.
+    if let Some(debug_area) = debug_area {
+        render_debug_panel(frame, app, debug_area);
+    }
 
     // Command palette overlay.
     if app.palette_open {
@@ -297,6 +333,35 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
+fn render_debug_panel(frame: &mut Frame, app: &App, area: Rect) {
+    let mut lines: Vec<Line> = app
+        .debug_logs
+        .iter()
+        .map(|log| Line::styled(log.as_str(), app.theme.muted_style()))
+        .collect();
+
+    if lines.is_empty() {
+        lines.push(Line::styled("No debug logs yet.", app.theme.muted_style()));
+    }
+
+    let total = lines.len() as u16;
+    let visible = area.height.saturating_sub(2); // Account for border.
+    let max_scroll = total.saturating_sub(visible);
+    let scroll = max_scroll.saturating_sub(app.debug_scroll);
+
+    let panel = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(app.theme.muted_style())
+                .title(" Debug "),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
+
+    frame.render_widget(panel, area);
+}
+
 fn render_palette(frame: &mut Frame, app: &App, area: Rect) {
     // Center the palette.
     let width = area.width.min(60);
@@ -371,6 +436,8 @@ pub enum Action {
     PaletteCommand(String),
     /// Toggle between Plan and Build mode.
     ToggleMode,
+    /// Toggle the debug side panel (requires --debug flag).
+    ToggleDebugPanel,
 }
 
 /// Handle a key event and return the resulting action.
@@ -397,6 +464,12 @@ pub fn handle_key(app: &mut App, event: &Event) -> Action {
             // Tab: toggle Plan/Build mode.
             (KeyModifiers::NONE, KeyCode::Tab) => {
                 return Action::ToggleMode;
+            }
+            // Ctrl+\: toggle debug panel (only in debug mode).
+            (KeyModifiers::CONTROL, KeyCode::Char('\\')) => {
+                if app.debug_mode {
+                    return Action::ToggleDebugPanel;
+                }
             }
             _ => {}
         }
