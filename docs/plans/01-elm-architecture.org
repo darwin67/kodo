@@ -71,7 +71,7 @@ change.
 
 * Step-by-step plan
 
-** Step 1: Define ~Message~ enum in ~message.rs~
+** TODO Step 1: Define ~Message~ enum in ~message.rs~
 
 All possible state changes, replacing the ~Action~ enum and inline agent event
 handling in main.rs:
@@ -126,7 +126,7 @@ pub enum Message {
 }
 #+end_src
 
-** Step 2: Define ~Command~ enum in ~command.rs~
+** TODO Step 2: Define ~Command~ enum in ~command.rs~
 
 Side effects that ~update()~ can request. The runtime loop executes them.
 
@@ -141,7 +141,7 @@ pub enum Command {
 }
 #+end_src
 
-** Step 3: Extract ~Model~ struct in ~model.rs~
+** TODO Step 3: Extract ~Model~ struct in ~model.rs~
 
 Move all state fields from ~App~ into ~Model~. No methods that perform side
 effects — only data and simple derived queries.
@@ -184,7 +184,7 @@ pub struct Model {
 }
 #+end_src
 
-** Step 4: Implement ~update()~ in ~update.rs~
+** TODO Step 4: Implement ~update()~ in ~update.rs~
 
 Pure function: takes ~&mut Model~ and ~Message~, returns ~Vec<Command>~. All
 state transitions live here. No I/O, no channels, no rendering.
@@ -195,7 +195,7 @@ Key design rules (matching iced/Elm):
 - Side effects are returned as ~Command~ values, never executed inline.
 - The function is testable without a terminal or network.
 
-** Step 5: Move rendering to ~view.rs~
+** TODO Step 5: Move rendering to ~view.rs~
 
 Move ~render()~, ~render_status_bar()~, ~render_output()~, ~render_input()~,
 ~render_debug_panel()~, ~render_palette()~, and ~palette_commands()~ from
@@ -206,7 +206,7 @@ The only signature change: ~fn view(frame: &mut Frame, model: &Model)~.
 This module is the *only* ratatui-specific code. When building a GUI, this file
 gets replaced with an iced ~view()~ function — everything else stays.
 
-** Step 6: Add event-to-message mapping
+** TODO Step 6: Add event-to-message mapping
 
 A small function that converts crossterm ~Event~ into ~Message~:
 
@@ -218,7 +218,7 @@ This lives in ~event.rs~ or a new ~subscription.rs~. It reads model state (e.g.
 ~palette_open~, ~is_streaming~, ~debug_mode~) to decide which message to
 produce. The function replaces the current ~handle_key()~ function.
 
-** Step 7: Refactor ~main.rs~ to the MVU runtime loop
+** TODO Step 7: Refactor ~main.rs~ to the MVU runtime loop
 
 The main loop becomes:
 
@@ -253,7 +253,7 @@ loop {
 ~execute_command()~ is the only place with side effects — it sends messages
 over channels or sets quit flags. It's the runtime's job, not the model's.
 
-** Step 8: Delete ~app.rs~, update ~lib.rs~
+** TODO Step 8: Delete ~app.rs~, update ~lib.rs~
 
 Remove ~app.rs~. Update ~lib.rs~ to export the new modules:
 
@@ -268,7 +268,7 @@ pub mod update;
 pub mod view;
 #+end_src
 
-** Step 9: Verify
+** TODO Step 9: Verify
 
 - [ ] ~cargo build~ clean
 - [ ] ~cargo test --workspace~ all pass
