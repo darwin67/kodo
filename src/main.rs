@@ -15,9 +15,8 @@ use kodo_tui::command::Command;
 use kodo_tui::event::{EventHandler, map_event};
 use kodo_tui::message::Message;
 use kodo_tui::model::Model;
-use kodo_tui::terminal::{init_terminal, restore_terminal};
+use kodo_tui::tui::{init_terminal, restore_terminal, view};
 use kodo_tui::update::update;
-use kodo_tui::view::view;
 
 #[derive(Parser)]
 #[command(name = "kodo", about = "A coding agent for your terminal")]
