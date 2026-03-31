@@ -346,8 +346,6 @@ pub fn palette_commands() -> Vec<(&'static str, &'static str)> {
     vec![
         ("Switch Model", "Change the active model"),
         ("Switch Provider", "Change the LLM provider"),
-        ("Plan Mode", "Switch to read-only mode"),
-        ("Build Mode", "Switch to full execution mode"),
         ("Dark Theme", "Switch to dark theme"),
         ("Light Theme", "Switch to light theme"),
         ("Undo Last Edit", "Revert last file change"),
@@ -371,6 +369,8 @@ pub enum Action {
     Quit,
     /// Palette command was selected.
     PaletteCommand(String),
+    /// Toggle between Plan and Build mode.
+    ToggleMode,
 }
 
 /// Handle a key event and return the resulting action.
@@ -393,6 +393,10 @@ pub fn handle_key(app: &mut App, event: &Event) -> Action {
             // Ctrl+C or Ctrl+D: quit.
             (KeyModifiers::CONTROL, KeyCode::Char('c' | 'd')) => {
                 return Action::Quit;
+            }
+            // Tab: toggle Plan/Build mode.
+            (KeyModifiers::NONE, KeyCode::Tab) => {
+                return Action::ToggleMode;
             }
             _ => {}
         }

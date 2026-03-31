@@ -129,6 +129,14 @@ async fn main() -> Result<()> {
                         let _ = req_tx.send(AgentRequest::Quit);
                         break;
                     }
+                    Action::ToggleMode => {
+                        let new_mode = if tui_app.mode == "plan" { "build" } else { "plan" };
+                        tui_app.mode = new_mode.into();
+                        tui_app.push_message(
+                            ChatRole::System,
+                            format!("Switched to {new_mode} mode."),
+                        );
+                    }
                     Action::PaletteCommand(cmd) => {
                         handle_palette_command(&mut tui_app, &cmd);
                     }
@@ -183,14 +191,6 @@ async fn main() -> Result<()> {
 
 fn handle_palette_command(app: &mut App, cmd: &str) {
     match cmd {
-        "Plan Mode" => {
-            app.mode = "plan".into();
-            app.push_message(ChatRole::System, "Switched to plan mode (read-only).");
-        }
-        "Build Mode" => {
-            app.mode = "build".into();
-            app.push_message(ChatRole::System, "Switched to build mode.");
-        }
         "Dark Theme" => {
             app.theme = Theme::dark();
             app.push_message(ChatRole::System, "Switched to dark theme.");
