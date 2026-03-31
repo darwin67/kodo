@@ -218,7 +218,7 @@ This lives in ~event.rs~ or a new ~subscription.rs~. It reads model state (e.g.
 ~palette_open~, ~is_streaming~, ~debug_mode~) to decide which message to
 produce. The function replaces the current ~handle_key()~ function.
 
-** TODO Step 7: Refactor ~main.rs~ to the MVU runtime loop
+** DONE Step 7: Refactor ~main.rs~ to the MVU runtime loop
 
 The main loop becomes:
 
