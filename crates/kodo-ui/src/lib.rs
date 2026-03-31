@@ -6,6 +6,7 @@ pub mod update;
 
 // Infrastructure modules - runtime and support
 pub mod event;
+pub mod syntax;
 pub mod theme;
 
 // UI implementation modules - framework-specific

@@ -1,4 +1,4 @@
-use crate::theme::Theme;
+use crate::{syntax::SyntaxHighlighter, theme::Theme};
 
 /// A message in the conversation display.
 /// Represents both user inputs and agent responses.
@@ -72,6 +72,8 @@ pub struct Model {
     // -- UI state --
     /// Active color theme
     pub theme: Theme,
+    /// Syntax highlighter for code blocks (lazy-initialized)
+    pub syntax_highlighter: Option<SyntaxHighlighter>,
 
     // -- Application lifecycle --
     /// Whether the application should terminate
@@ -113,6 +115,7 @@ impl Model {
 
             // UI state
             theme: Theme::dark(),
+            syntax_highlighter: None, // Lazy-initialized
 
             // Application lifecycle
             should_quit: false,
@@ -152,6 +155,23 @@ impl Model {
     /// Check if the debug panel is open.
     pub fn debug_panel_is_open(&self) -> bool {
         self.debug_panel_open
+    }
+
+    /// Get or initialize the syntax highlighter.
+    pub fn get_syntax_highlighter(&mut self) -> &SyntaxHighlighter {
+        if self.syntax_highlighter.is_none() {
+            let mut highlighter = SyntaxHighlighter::new();
+            highlighter.set_theme(self.theme.is_dark());
+            self.syntax_highlighter = Some(highlighter);
+        }
+        self.syntax_highlighter.as_ref().unwrap()
+    }
+
+    /// Update syntax highlighter theme when theme changes.
+    pub fn update_syntax_theme(&mut self) {
+        if let Some(ref mut highlighter) = self.syntax_highlighter {
+            highlighter.set_theme(self.theme.is_dark());
+        }
     }
 }
 

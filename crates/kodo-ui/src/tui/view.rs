@@ -6,7 +6,14 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use crate::model::{ChatRole, Model};
+use crate::{
+    model::{ChatRole, Model},
+    syntax::{MarkdownParser, SyntaxHighlighter},
+};
+
+// Global syntax highlighter - initialized once
+use std::sync::OnceLock;
+static SYNTAX_HIGHLIGHTER: OnceLock<SyntaxHighlighter> = OnceLock::new();
 
 /// Main view function following the Elm Architecture.
 /// This is a PURE function that takes the model and renders it to the terminal.
