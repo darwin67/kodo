@@ -141,10 +141,6 @@ async fn main() -> Result<()> {
                     Action::ToggleMode => {
                         let new_mode = if tui_app.mode == "plan" { "build" } else { "plan" };
                         tui_app.mode = new_mode.into();
-                        tui_app.push_message(
-                            ChatRole::System,
-                            format!("Switched to {new_mode} mode."),
-                        );
                         tui_app.push_debug_log(format!("Mode toggled to {new_mode}"));
                     }
                     Action::ToggleDebugPanel => {
