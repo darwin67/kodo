@@ -311,6 +311,16 @@ fn into_session(r: (String, String, String, Option<String>, String, String)) -> 
 // Thread CRUD
 // ---------------------------------------------------------------------------
 
+type ThreadRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+);
+
 /// Create a new thread within a session.
 pub async fn create_thread(
     pool: &DbPool,
@@ -342,15 +352,7 @@ pub async fn create_thread(
 
 /// Get a thread by ID.
 pub async fn get_thread(pool: &DbPool, id: &str) -> Result<Option<Thread>> {
-    let row: Option<(
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        String,
-    )> = sqlx::query_as(
+    let row: Option<ThreadRow> = sqlx::query_as(
         "SELECT id, session_id, role, provider, model, heartbeat_at, updated_at \
              FROM threads WHERE id = ?",
     )
@@ -363,15 +365,7 @@ pub async fn get_thread(pool: &DbPool, id: &str) -> Result<Option<Thread>> {
 
 /// List all threads in a session.
 pub async fn list_threads(pool: &DbPool, session_id: &str) -> Result<Vec<Thread>> {
-    let rows: Vec<(
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        String,
-    )> = sqlx::query_as(
+    let rows: Vec<ThreadRow> = sqlx::query_as(
         "SELECT id, session_id, role, provider, model, heartbeat_at, updated_at \
              FROM threads WHERE session_id = ? ORDER BY id",
     )
@@ -388,15 +382,7 @@ pub async fn get_thread_by_role(
     session_id: &str,
     role: &str,
 ) -> Result<Option<Thread>> {
-    let row: Option<(
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        String,
-    )> = sqlx::query_as(
+    let row: Option<ThreadRow> = sqlx::query_as(
         "SELECT id, session_id, role, provider, model, heartbeat_at, updated_at \
              FROM threads WHERE session_id = ? AND role = ? LIMIT 1",
     )
@@ -436,17 +422,7 @@ pub async fn touch_thread(pool: &DbPool, thread_id: &str, session_id: &str) -> R
     Ok(())
 }
 
-fn into_thread(
-    r: (
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        String,
-    ),
-) -> Thread {
+fn into_thread(r: ThreadRow) -> Thread {
     Thread {
         id: r.0,
         session_id: r.1,
