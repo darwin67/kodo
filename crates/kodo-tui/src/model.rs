@@ -13,6 +13,8 @@ pub struct ChatMessage {
 pub enum ChatRole {
     User,
     Assistant,
+    Tool,
+    System,
 }
 
 /// The complete application state following the Elm Architecture.
