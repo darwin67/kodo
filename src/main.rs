@@ -186,7 +186,7 @@ async fn main() -> Result<()> {
             continue;
         }
 
-        if let Err(e) = agent.process_message(&input).await {
+        if let Err(e) = agent.process_message(&input, None).await {
             eprintln!("\nerror: {e:#}");
         }
 

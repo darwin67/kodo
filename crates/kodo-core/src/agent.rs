@@ -1,10 +1,10 @@
-use std::io::{self, Write};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Result;
 use futures::StreamExt;
+use tokio::sync::mpsc;
 use tracing::debug;
 
 use kodo_fmt::registry::FormatterRegistry;
@@ -38,6 +38,41 @@ as needed to accomplish the user's request.
 
 Be concise and direct. Focus on solving the problem.";
 
+// ---------------------------------------------------------------------------
+// Agent events — emitted to the UI layer
+// ---------------------------------------------------------------------------
+
+/// Events emitted by the agent during message processing.
+/// These replace direct stdout/stderr writes, allowing the TUI to render them.
+#[derive(Debug, Clone)]
+pub enum AgentEvent {
+    /// A chunk of streamed text from the assistant.
+    TextDelta(String),
+    /// Assistant finished streaming text.
+    TextDone,
+    /// A tool is about to be executed.
+    ToolStart { name: String },
+    /// A tool was denied (mode restriction).
+    ToolDenied { name: String, reason: String },
+    /// A tool was cancelled by user (high-risk).
+    ToolCancelled { name: String },
+    /// A tool completed.
+    ToolDone { name: String, success: bool },
+    /// Formatter ran on a file.
+    Formatted { message: String },
+    /// An error occurred.
+    Error(String),
+    /// Message processing is complete.
+    Done,
+}
+
+/// Sender type for agent events.
+pub type AgentEventTx = mpsc::UnboundedSender<AgentEvent>;
+
+// ---------------------------------------------------------------------------
+// Agent
+// ---------------------------------------------------------------------------
+
 /// The main agent that orchestrates the agentic loop.
 pub struct Agent {
     provider: Arc<dyn Provider>,
@@ -66,77 +101,65 @@ impl Agent {
         }
     }
 
-    /// Set the model to use.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
         self
     }
 
-    /// Set the operating mode.
     pub fn with_mode(mut self, mode: Mode) -> Self {
         self.mode = mode;
         self
     }
 
-    /// Access the tool registry for registering tools.
     pub fn tool_registry_mut(&mut self) -> &mut ToolRegistry {
         &mut self.tool_registry
     }
 
-    /// Read-only access to the tool registry.
     pub fn tool_registry(&self) -> &ToolRegistry {
         &self.tool_registry
     }
 
-    /// Access the formatter registry for customization.
     pub fn formatter_registry_mut(&mut self) -> &mut FormatterRegistry {
         &mut self.formatter_registry
     }
 
-    /// Get the current model name.
     pub fn model(&self) -> &str {
         &self.model
     }
 
-    /// Set the model name at runtime.
     pub fn set_model(&mut self, model: impl Into<String>) {
         self.model = model.into();
     }
 
-    /// Get the current provider name.
     pub fn provider_name(&self) -> &str {
         self.provider.name()
     }
 
-    /// Switch to a different provider at runtime.
-    /// Clears conversation history since message formats differ between providers.
     pub fn set_provider(&mut self, provider: Arc<dyn Provider>) {
-        // TODO context shouldn't be lost though.
-        // something to consider on how to share sessions
         self.provider = provider;
         self.messages.clear();
     }
 
-    /// Get the context tracker for display purposes.
     pub fn context(&self) -> &ContextTracker {
         &self.context
     }
 
-    /// Read-only access to the checkpoint manager.
     pub fn checkpoints(&self) -> &CheckpointManager {
         &self.checkpoints
     }
 
-    /// Undo the most recent file edit.
     pub async fn undo(&mut self) -> Result<String> {
         self.checkpoints.undo_last().await
     }
 
     /// Process a user message through the agentic loop.
-    ///
-    /// This sends the message to the LLM, streams the response, handles any
-    /// tool calls, and loops until the model produces a final response.
-    pub async fn process_message(&mut self, user_input: &str) -> Result<()> {
+    /// Emits `AgentEvent`s to the provided sender for UI rendering.
+    /// If no sender is provided, events are silently discarded (headless mode).
+    pub async fn process_message(
+        &mut self,
+        user_input: &str,
+        tx: Option<&AgentEventTx>,
+    ) -> Result<()> {
         self.messages.push(Message::user(user_input));
 
         loop {
@@ -151,20 +174,19 @@ impl Agent {
 
             let mut stream = self.provider.stream(request).await?;
 
-            let (assistant_message, stop_reason) = self.consume_stream(&mut stream).await?;
+            let (assistant_message, stop_reason) = self.consume_stream(&mut stream, tx).await?;
 
             self.messages.push(assistant_message.clone());
 
             match stop_reason {
                 StopReason::ToolUse => {
-                    let tool_results = self.handle_tool_calls(&assistant_message).await?;
+                    let tool_results = self.handle_tool_calls(&assistant_message, tx).await?;
                     if !tool_results.is_empty() {
                         self.messages.push(Message::tool_results(tool_results));
                     }
-                    // Loop back to send tool results to the LLM.
                 }
                 StopReason::EndTurn | StopReason::MaxTokens => {
-                    // Done.
+                    emit(tx, AgentEvent::Done);
                     break;
                 }
             }
@@ -173,9 +195,7 @@ impl Agent {
         Ok(())
     }
 
-    /// Build a completion request from the current conversation state.
     fn build_request(&self) -> CompletionRequest {
-        // Only expose tools that the current mode permits.
         let mode = self.mode;
         let tools: Vec<ToolDefinition> = self
             .tool_registry
@@ -193,11 +213,10 @@ impl Agent {
         }
     }
 
-    /// Consume a stream of events, printing text deltas and building the
-    /// complete assistant message. Returns the message and stop reason.
     async fn consume_stream(
         &mut self,
         stream: &mut Pin<Box<dyn futures::Stream<Item = Result<StreamEvent>> + Send>>,
+        tx: Option<&AgentEventTx>,
     ) -> Result<(Message, StopReason)> {
         let mut content_blocks: Vec<ContentBlock> = Vec::new();
         let mut current_text = String::new();
@@ -214,12 +233,10 @@ impl Agent {
                     self.context.record(&usage);
                 }
                 StreamEvent::TextDelta { text } => {
-                    print!("{text}");
-                    io::stdout().flush()?;
+                    emit(tx, AgentEvent::TextDelta(text.clone()));
                     current_text.push_str(&text);
                 }
                 StreamEvent::ToolUseStart { id, name } => {
-                    // If we were accumulating text, push it as a block.
                     if !current_text.is_empty() {
                         content_blocks.push(ContentBlock::text(&current_text));
                         current_text.clear();
@@ -256,11 +273,9 @@ impl Agent {
             }
         }
 
-        // Push any remaining text.
         if !current_text.is_empty() {
             content_blocks.push(ContentBlock::text(&current_text));
-            // Newline after the streamed text.
-            println!();
+            emit(tx, AgentEvent::TextDone);
         }
 
         let message = Message {
@@ -271,10 +286,10 @@ impl Agent {
         Ok((message, stop_reason))
     }
 
-    /// Execute tool calls from an assistant message and return the results.
     async fn handle_tool_calls(
         &mut self,
         assistant_message: &Message,
+        tx: Option<&AgentEventTx>,
     ) -> Result<Vec<ContentBlock>> {
         let tool_uses = assistant_message.tool_uses();
         if tool_uses.is_empty() {
@@ -301,12 +316,18 @@ impl Agent {
                         tool.permission_level(),
                         self.mode
                     );
-                    eprintln!("\n  [denied: {name} — {msg}]");
+                    emit(
+                        tx,
+                        AgentEvent::ToolDenied {
+                            name: name.clone(),
+                            reason: msg.clone(),
+                        },
+                    );
                     results.push(ContentBlock::tool_result(id, &msg, true));
                     continue;
                 }
 
-                // Check for high-risk shell commands in Build mode.
+                // Check for high-risk shell commands.
                 if name == "shell"
                     && let Some(command) = input.get("command").and_then(|v| v.as_str())
                     && let Some(reason) = safety::check_high_risk(command)
@@ -315,7 +336,7 @@ impl Agent {
                         &format!("{reason}\n  Command: {command}"),
                     )
                 {
-                    eprintln!("  [cancelled: {name}]");
+                    emit(tx, AgentEvent::ToolCancelled { name: name.clone() });
                     results.push(ContentBlock::tool_result(
                         id,
                         "User denied execution of high-risk command.",
@@ -334,7 +355,7 @@ impl Agent {
                     }
                 }
 
-                eprintln!("\n  [tool: {name}]");
+                emit(tx, AgentEvent::ToolStart { name: name.clone() });
 
                 match self.tool_registry.execute(name, input.clone(), &ctx).await {
                     Ok(output) => {
@@ -342,8 +363,16 @@ impl Agent {
 
                         // Run formatter after file write/edit tools.
                         if output.success && FILE_WRITE_TOOLS.contains(&name.as_str()) {
-                            self.maybe_format_file(name, input).await;
+                            self.maybe_format_file(name, input, tx).await;
                         }
+
+                        emit(
+                            tx,
+                            AgentEvent::ToolDone {
+                                name: name.clone(),
+                                success: output.success,
+                            },
+                        );
 
                         results.push(ContentBlock::tool_result(
                             id,
@@ -353,6 +382,7 @@ impl Agent {
                     }
                     Err(e) => {
                         debug!(tool = %name, error = %e, "tool failed");
+                        emit(tx, AgentEvent::Error(format!("Tool '{name}' failed: {e}")));
                         results.push(ContentBlock::tool_result(id, format!("Error: {e}"), true));
                     }
                 }
@@ -362,9 +392,12 @@ impl Agent {
         Ok(results)
     }
 
-    /// Attempt to format a file after a write/edit tool has modified it.
-    /// Runs silently — logs to UI but doesn't feed back to LLM.
-    async fn maybe_format_file(&self, tool_name: &str, input: &serde_json::Value) {
+    async fn maybe_format_file(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        tx: Option<&AgentEventTx>,
+    ) {
         let path_str = match input.get("path").and_then(|v| v.as_str()) {
             Some(p) => p,
             None => return,
@@ -374,7 +407,12 @@ impl Agent {
 
         if let Some(result) = format_file(&self.formatter_registry, &path).await {
             if result.success {
-                eprintln!("  [fmt: {}]", result.message);
+                emit(
+                    tx,
+                    AgentEvent::Formatted {
+                        message: result.message,
+                    },
+                );
             } else {
                 debug!(
                     tool = tool_name,
@@ -384,5 +422,12 @@ impl Agent {
                 );
             }
         }
+    }
+}
+
+/// Emit an event to the UI channel (if provided).
+fn emit(tx: Option<&AgentEventTx>, event: AgentEvent) {
+    if let Some(tx) = tx {
+        let _ = tx.send(event);
     }
 }
