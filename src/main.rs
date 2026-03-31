@@ -11,12 +11,12 @@ use kodo_llm::gemini::GeminiProvider;
 use kodo_llm::ollama::OllamaProvider;
 use kodo_llm::openai::OpenAiProvider;
 use kodo_llm::provider::Provider;
-use kodo_tui::command::Command;
-use kodo_tui::event::{EventHandler, map_event};
-use kodo_tui::message::Message;
-use kodo_tui::model::Model;
-use kodo_tui::tui::{init_terminal, restore_terminal, view};
-use kodo_tui::update::update;
+use kodo_ui::command::Command;
+use kodo_ui::event::{EventHandler, map_event};
+use kodo_ui::message::Message;
+use kodo_ui::model::Model;
+use kodo_ui::tui::{init_terminal, restore_terminal, view};
+use kodo_ui::update::update;
 
 #[derive(Parser)]
 #[command(name = "kodo", about = "A coding agent for your terminal")]

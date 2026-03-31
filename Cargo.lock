@@ -1156,7 +1156,7 @@ dependencies = [
  "kodo-lsp",
  "kodo-store",
  "kodo-tools",
- "kodo-tui",
+ "kodo-ui",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1256,7 +1256,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kodo-tui"
+name = "kodo-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",

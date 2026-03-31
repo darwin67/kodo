@@ -1,5 +1,5 @@
 [package]
-name = "kodo-tui"
+name = "kodo-ui"
 version.workspace = true
 edition.workspace = true
 
