@@ -92,6 +92,8 @@ impl Model {
     /// Create a new Model with default values.
     /// Takes debug_mode as a parameter since it's set from CLI args.
     pub fn new(debug_mode: bool) -> Self {
+        let keybinds = KeyBindRegistry::new();
+        let leader_timeout = keybinds.leader_timeout_ms();
         Self {
             // Input state
             input: String::new(),
@@ -124,8 +126,8 @@ impl Model {
             // UI state
             theme: Theme::dark(),
             syntax_highlighter: None, // Lazy-initialized
-            keybinds: KeyBindRegistry::new(),
-            leader_state: LeaderState::new(1000), // 1 second timeout
+            keybinds,
+            leader_state: LeaderState::new(leader_timeout),
 
             // Application lifecycle
             should_quit: false,

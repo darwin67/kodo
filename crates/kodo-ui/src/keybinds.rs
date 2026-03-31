@@ -168,6 +168,11 @@ impl KeyBindRegistry {
             .collect()
     }
 
+    /// Get the leader timeout in milliseconds
+    pub fn leader_timeout_ms(&self) -> u64 {
+        self.leader_timeout_ms
+    }
+
     /// Format key for display
     pub fn format_key(keybind: &KeyBind) -> String {
         let mut parts = Vec::new();
