@@ -1,16 +1,19 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::Parser;
+use tokio::sync::mpsc;
 
-use kodo_core::agent::Agent;
-use kodo_core::mode::Mode;
+use kodo_core::agent::{Agent, AgentEvent};
 use kodo_llm::anthropic::AnthropicProvider;
 use kodo_llm::gemini::GeminiProvider;
 use kodo_llm::ollama::OllamaProvider;
 use kodo_llm::openai::OpenAiProvider;
 use kodo_llm::provider::Provider;
-use kodo_tui::terminal::read_user_input;
+use kodo_tui::app::{self, Action, App, ChatRole};
+use kodo_tui::event::EventHandler;
+use kodo_tui::theme::Theme;
 
 #[derive(Parser)]
 #[command(name = "kodo", about = "A coding agent for your terminal")]
@@ -24,11 +27,7 @@ struct Cli {
     provider: Option<String>,
 }
 
-/// Create a provider by name.
 fn create_provider(name: &str) -> Result<Arc<dyn Provider>> {
-    // TODO
-    // credentials should be able to be set on run time and stored.
-    // and future processes/sessions will be able to reuse those crede
     match name {
         "anthropic" => Ok(Arc::new(AnthropicProvider::from_env()?)),
         "openai" => Ok(Arc::new(OpenAiProvider::from_env()?)),
@@ -38,7 +37,6 @@ fn create_provider(name: &str) -> Result<Arc<dyn Provider>> {
     }
 }
 
-/// Return the default model for a given provider name.
 fn default_model(provider_name: &str) -> &str {
     match provider_name {
         "anthropic" => "claude-sonnet-4-20250514",
@@ -49,155 +47,166 @@ fn default_model(provider_name: &str) -> &str {
     }
 }
 
+/// Messages sent from the TUI event loop to the agent task.
+enum AgentRequest {
+    ProcessMessage(String),
+    Quit,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing (respects RUST_LOG env var).
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .with_target(false)
+        .with_writer(std::io::stderr) // Log to stderr, not stdout (TUI owns stdout).
         .init();
 
     let cli = Cli::parse();
 
-    // Determine provider.
     let provider_name = cli.provider.as_deref().unwrap_or("anthropic");
     let provider = create_provider(provider_name)?;
-
-    // Determine model.
     let model = cli
         .model
         .unwrap_or_else(|| default_model(provider_name).to_string());
 
-    // Build the agent.
     let mut agent = Agent::new(provider).with_model(&model);
-
-    // Register built-in tools.
     kodo_tools::register_builtin_tools(agent.tool_registry_mut());
 
-    println!("kodo v{}", env!("CARGO_PKG_VERSION"));
-    println!(
-        "Provider: {} | Model: {}",
-        agent.provider_name(),
-        agent.model()
-    );
-    println!("Type your message and press Enter. Ctrl+D to exit.\n");
+    // Initialize TUI.
+    let mut terminal = app::init_terminal()?;
+    let mut events = EventHandler::new(Duration::from_millis(100));
 
-    // Main REPL loop.
-    loop {
-        let prompt = format!("[{}] > ", agent.mode);
-        let input = match read_user_input(&prompt) {
-            Ok(Some(input)) => input,
-            Ok(None) => continue,
-            Err(_) => break, // EOF or error
-        };
+    let mut tui_app = App::new();
+    tui_app.provider = agent.provider_name().to_string();
+    tui_app.model = agent.model().to_string();
+    tui_app.mode = agent.mode.to_string();
 
-        if input == "/quit" || input == "/exit" {
-            break;
+    // Channel for agent events -> TUI.
+    let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
+    // Channel for TUI -> agent requests.
+    let (req_tx, mut req_rx) = mpsc::unbounded_channel::<AgentRequest>();
+
+    // Spawn agent task.
+    let agent_event_tx = agent_tx.clone();
+    tokio::spawn(async move {
+        while let Some(request) = req_rx.recv().await {
+            match request {
+                AgentRequest::ProcessMessage(input) => {
+                    if let Err(e) = agent.process_message(&input, Some(&agent_event_tx)).await {
+                        let _ = agent_event_tx.send(AgentEvent::Error(format!("{e:#}")));
+                    }
+                    // Always send Done so the TUI knows processing finished.
+                    let _ = agent_event_tx.send(AgentEvent::Done);
+                }
+                AgentRequest::Quit => break,
+            }
         }
+    });
 
-        if input == "/mode" || input == "/mode plan" || input == "/mode build" {
-            match input.as_str() {
-                "/mode plan" => {
-                    agent.mode = Mode::Plan;
-                    println!("Switched to plan mode (read-only).\n");
-                }
-                "/mode build" => {
-                    agent.mode = Mode::Build;
-                    println!("Switched to build mode.\n");
-                }
-                _ => {
-                    println!("Current mode: {}", agent.mode);
-                    println!("  /mode plan   — read-only (search, read, web fetch)");
-                    println!("  /mode build  — full execution (all tools)\n");
+    // Main TUI event loop.
+    loop {
+        // Draw.
+        terminal.draw(|frame| app::render(frame, &tui_app))?;
+
+        // Process events with a non-blocking select.
+        tokio::select! {
+            // Terminal/keyboard events.
+            event = events.next() => {
+                let event = event?;
+                let action = app::handle_key(&mut tui_app, &event);
+
+                match action {
+                    Action::Submit(input) => {
+                        tui_app.push_message(ChatRole::User, &input);
+                        tui_app.is_streaming = true;
+                        tui_app.streaming_text.clear();
+                        let _ = req_tx.send(AgentRequest::ProcessMessage(input));
+                    }
+                    Action::Quit => {
+                        let _ = req_tx.send(AgentRequest::Quit);
+                        break;
+                    }
+                    Action::PaletteCommand(cmd) => {
+                        handle_palette_command(&mut tui_app, &cmd);
+                    }
+                    Action::None => {}
                 }
             }
-            continue;
-        }
-
-        if input.starts_with("/model") {
-            let parts: Vec<&str> = input.splitn(3, ' ').collect();
-            match parts.len() {
-                1 => {
-                    // /model — show current
-                    println!(
-                        "Provider: {} | Model: {}",
-                        agent.provider_name(),
-                        agent.model()
-                    );
-                    println!("  /model <name>              — switch model");
-                    println!("  /model <provider> <name>   — switch provider and model");
-                    println!("  Available providers: anthropic, openai, gemini, ollama\n");
-                }
-                2 => {
-                    // /model <name> — switch model only
-                    agent.set_model(parts[1]);
-                    println!("Model set to: {}\n", agent.model());
-                }
-                3 => {
-                    // /model <provider> <name> — switch provider + model
-                    match create_provider(parts[1]) {
-                        Ok(new_provider) => {
-                            agent.set_provider(new_provider);
-                            agent.set_model(parts[2]);
-                            println!(
-                                "Switched to {} / {} (conversation cleared)\n",
-                                agent.provider_name(),
-                                agent.model()
-                            );
+            // Agent events (streaming text, tool status, etc.).
+            Some(agent_event) = agent_rx.recv() => {
+                match agent_event {
+                    AgentEvent::TextDelta(text) => {
+                        tui_app.append_streaming(&text);
+                    }
+                    AgentEvent::TextDone => {
+                        tui_app.finish_streaming();
+                    }
+                    AgentEvent::ToolStart { name } => {
+                        tui_app.push_message(ChatRole::Tool, format!("[{name}]"));
+                    }
+                    AgentEvent::ToolDone { name, success } => {
+                        let status = if success { "done" } else { "failed" };
+                        tui_app.push_message(ChatRole::Tool, format!("[{name}: {status}]"));
+                    }
+                    AgentEvent::ToolDenied { name, reason } => {
+                        tui_app.push_message(ChatRole::Tool, format!("[denied: {name}] {reason}"));
+                    }
+                    AgentEvent::ToolCancelled { name } => {
+                        tui_app.push_message(ChatRole::Tool, format!("[cancelled: {name}]"));
+                    }
+                    AgentEvent::Formatted { message } => {
+                        tui_app.push_message(ChatRole::Tool, format!("[fmt: {message}]"));
+                    }
+                    AgentEvent::Error(msg) => {
+                        tui_app.push_message(ChatRole::System, format!("Error: {msg}"));
+                        tui_app.is_streaming = false;
+                    }
+                    AgentEvent::Done => {
+                        // If there's still streaming text, finalize it.
+                        if tui_app.is_streaming {
+                            tui_app.finish_streaming();
                         }
-                        Err(e) => println!("Error: {e}\n"),
                     }
                 }
-                _ => unreachable!(),
             }
-            continue;
         }
-
-        if input == "/undo" {
-            match agent.undo().await {
-                Ok(msg) => println!("{msg}\n"),
-                Err(e) => println!("Cannot undo: {e}\n"),
-            }
-            continue;
-        }
-
-        // TODO this will be replaced by modal operations on the TUI/GUI
-        if input == "/tools" {
-            let registry = agent.tool_registry();
-            if registry.is_empty() {
-                println!("No tools registered.");
-            } else {
-                println!("Registered tools ({}):\n", registry.len());
-                let mut tools: Vec<_> = registry.iter().collect();
-                tools.sort_by_key(|t| t.name());
-                for tool in tools {
-                    println!(
-                        "  {:<20} [{:?}]  {}",
-                        tool.name(),
-                        tool.permission_level(),
-                        tool.description()
-                    );
-                }
-            }
-            println!();
-            continue;
-        }
-
-        if let Err(e) = agent.process_message(&input, None).await {
-            eprintln!("\nerror: {e:#}");
-        }
-
-        println!();
     }
 
-    let ctx = agent.context();
-    println!(
-        "\nSession stats: {} input tokens, {} output tokens",
-        ctx.total_input_tokens, ctx.total_output_tokens
-    );
+    // Restore terminal.
+    app::restore_terminal(&mut terminal)?;
 
     Ok(())
+}
+
+fn handle_palette_command(app: &mut App, cmd: &str) {
+    match cmd {
+        "Plan Mode" => {
+            app.mode = "plan".into();
+            app.push_message(ChatRole::System, "Switched to plan mode (read-only).");
+        }
+        "Build Mode" => {
+            app.mode = "build".into();
+            app.push_message(ChatRole::System, "Switched to build mode.");
+        }
+        "Dark Theme" => {
+            app.theme = Theme::dark();
+            app.push_message(ChatRole::System, "Switched to dark theme.");
+        }
+        "Light Theme" => {
+            app.theme = Theme::light();
+            app.push_message(ChatRole::System, "Switched to light theme.");
+        }
+        "Quit" => {
+            app.should_quit = true;
+        }
+        _ => {
+            app.push_message(
+                ChatRole::System,
+                format!("Command not yet implemented: {cmd}"),
+            );
+        }
+    }
 }
