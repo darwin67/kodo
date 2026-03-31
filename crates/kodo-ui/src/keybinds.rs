@@ -101,10 +101,10 @@ impl KeyBindRegistry {
         self.bind(KeyBind::key(KeyCode::F(12)), KeyAction::ToggleDebug);
         self.bind(KeyBind::key(KeyCode::Tab), KeyAction::ToggleMode);
 
-        // Leader key setup (semicolon as leader by default - easy to reach, rarely used alone)
-        self.set_leader_key(KeyCode::Char(';'));
+        // Leader key setup (Ctrl+Space as leader by default)
+        self.set_leader_key(KeyCode::Char(' '));
 
-        // Leader + key combinations (; + key)
+        // Leader + key combinations (Ctrl+Space, then key)
         self.bind_leader(KeyCode::Char('q'), KeyAction::Quit);
         self.bind_leader(KeyCode::Char('p'), KeyAction::OpenPalette);
         self.bind_leader(KeyCode::Char('m'), KeyAction::ToggleMode);
@@ -141,7 +141,8 @@ impl KeyBindRegistry {
     /// Check if a key is the leader key
     pub fn is_leader_key(&self, event: &KeyEvent) -> bool {
         if let Some(leader) = self.leader_key {
-            event.code == leader && event.modifiers == KeyModifiers::NONE
+            // Leader key is Ctrl+Space
+            event.code == leader && event.modifiers == KeyModifiers::CONTROL
         } else {
             false
         }
