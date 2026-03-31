@@ -124,7 +124,7 @@ mod tests {
         let table_names: Vec<&str> = tables.iter().map(|t| t.0.as_str()).collect();
         assert!(table_names.contains(&"sessions"));
         assert!(table_names.contains(&"messages"));
-        assert!(table_names.contains(&"auth_tokens"));
+        assert!(table_names.contains(&"auth_providers"));
         assert!(table_names.contains(&"memory"));
     }
 

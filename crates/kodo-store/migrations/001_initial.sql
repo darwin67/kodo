@@ -34,15 +34,14 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, id);
 
--- Auth tokens: stores provider credentials (secrets in OS keychain).
-CREATE TABLE IF NOT EXISTS auth_tokens (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    provider       TEXT NOT NULL UNIQUE,
-    token          TEXT NOT NULL,
-    refresh_token  TEXT,
-    expires_at     TEXT,
-    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+-- Auth providers: tracks which providers have credentials stored in the
+-- OS keychain. The actual secrets (token, refresh_token) live in the
+-- keychain, not in this table.
+CREATE TABLE IF NOT EXISTS auth_providers (
+    provider    TEXT PRIMARY KEY,
+    expires_at  TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Memory: key-value store for project/global memory.
