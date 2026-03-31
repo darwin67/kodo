@@ -1,0 +1,299 @@
+#+TITLE: Elm Architecture Refactor (TUI/GUI Shared UI Loop)
+#+DATE: 2026-03-31
+
+* Motivation
+
+The current TUI code mixes concerns: ~main.rs~ maps events to actions, applies
+state changes inline, and dispatches side effects all in one place. ~app.rs~
+combines state, input handling, and rendering. This makes it hard to reuse the
+UI logic when we build a GUI — every state transition would need to be
+reimplemented.
+
+The Elm architecture (Model-View-Update), which iced adopts, cleanly separates:
+
+- *Model*: the entire application state, plain data.
+- *Message*: a description of something that happened (user input, agent
+  response, timer tick). Messages are the /only/ way to change the model.
+- *update()*: a pure function ~(Model, Message) -> (Model, Vec<Command>)~ that
+  computes the next state and any side effects to perform.
+- *view()*: a pure function ~(Model) -> UI~ that renders the model. In ratatui
+  this is ~fn view(frame, &Model)~; in iced it returns an ~Element~. The
+  rendering backend changes, but the model doesn't.
+- *Command*: a description of a side effect (send message to agent, quit, etc).
+  The runtime executes commands and feeds their results back as new messages.
+
+By adopting this pattern now, the future GUI can reuse the *Model*, *Message*,
+*update()*, and *Command* types wholesale — only *view()* and the runtime loop
+change.
+
+* Architecture
+
+#+begin_src text
+                   ┌───────────────────────────┐
+                   │        Runtime Loop        │
+                   │  (main.rs / iced runtime)  │
+                   └─────┬─────────────┬───────┘
+                         │             │
+              events in  │             │  commands out
+                         ▼             ▼
+  ┌──────────┐    ┌────────────┐    ┌──────────┐    ┌──────────┐
+  │  Source   │───>│  Message   │───>│ update() │───>│ Command  │
+  │ (keyboard │    │  enum      │    │          │    │ enum     │
+  │  agent    │    │            │    │ Model -> │    │          │
+  │  timer)   │    └────────────┘    │ Model +  │    └──────────┘
+  └──────────┘                       │ Commands │
+                                     └────┬─────┘
+                                          │
+                                          ▼
+                                     ┌──────────┐
+                                     │  view()  │
+                                     │          │
+                                     │ Model -> │
+                                     │ Frame    │
+                                     └──────────┘
+#+end_src
+
+* File layout after refactor
+
+| File          | Contains                                                     |
+|---------------+--------------------------------------------------------------|
+| ~model.rs~    | ~Model~ struct (all application state), ~ChatMessage~, etc   |
+| ~message.rs~  | ~Message~ enum (every possible state change)                 |
+| ~update.rs~   | ~fn update(model, msg) -> Vec<Command>~ (pure state logic)   |
+| ~command.rs~  | ~Command~ enum (side effects the runtime must execute)       |
+| ~view.rs~     | ~fn view(frame, &Model)~ + all render_* helpers (ratatui)    |
+| ~event.rs~    | ~EventHandler~ (unchanged, maps crossterm -> Message)        |
+| ~theme.rs~    | ~Theme~ struct (unchanged)                                   |
+| ~terminal.rs~ | Terminal init/restore helpers (ratatui-specific)             |
+| ~lib.rs~      | Re-exports                                                   |
+
+~app.rs~ is removed — its contents are split across the above files.
+
+* Step-by-step plan
+
+** Step 1: Define ~Message~ enum in ~message.rs~
+
+All possible state changes, replacing the ~Action~ enum and inline agent event
+handling in main.rs:
+
+#+begin_src rust
+pub enum Message {
+    // -- Input events --
+    KeyInput(char),
+    Backspace,
+    Delete,
+    CursorLeft,
+    CursorRight,
+    CursorHome,
+    CursorEnd,
+    Submit,                      // Enter key
+    ScrollUp(u16),
+    ScrollDown(u16),
+
+    // -- Mode --
+    ToggleMode,                  // Tab key
+
+    // -- Command palette --
+    OpenPalette,
+    ClosePalette,
+    PaletteInput(char),
+    PaletteBackspace,
+    PaletteUp,
+    PaletteDown,
+    PaletteSelect,
+
+    // -- Theme --
+    SetTheme(ThemeChoice),
+
+    // -- Debug --
+    ToggleDebugPanel,
+
+    // -- Agent lifecycle --
+    AgentTextDelta(String),
+    AgentTextDone,
+    AgentToolStart { name: String },
+    AgentToolDone { name: String, success: bool },
+    AgentToolDenied { name: String, reason: String },
+    AgentToolCancelled { name: String },
+    AgentFormatted { message: String },
+    AgentError(String),
+    AgentDone,
+
+    // -- System --
+    Tick,
+    Resize(u16, u16),
+    Quit,
+}
+#+end_src
+
+** Step 2: Define ~Command~ enum in ~command.rs~
+
+Side effects that ~update()~ can request. The runtime loop executes them.
+
+#+begin_src rust
+pub enum Command {
+    /// Send a user message to the agent for processing.
+    SendToAgent(String),
+    /// Request the application to exit.
+    Quit,
+    /// No operation (convenience for update arms with no side effect).
+    None,
+}
+#+end_src
+
+** Step 3: Extract ~Model~ struct in ~model.rs~
+
+Move all state fields from ~App~ into ~Model~. No methods that perform side
+effects — only data and simple derived queries.
+
+#+begin_src rust
+pub struct Model {
+    // Input
+    pub input: String,
+    pub cursor_pos: usize,
+
+    // Chat
+    pub messages: Vec<ChatMessage>,
+    pub scroll_offset: u16,
+    pub is_streaming: bool,
+    pub streaming_text: String,
+
+    // Session info
+    pub mode: String,
+    pub provider: String,
+    pub model_name: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+
+    // Palette
+    pub palette_open: bool,
+    pub palette_query: String,
+    pub palette_selected: usize,
+
+    // Debug
+    pub debug_mode: bool,
+    pub debug_panel_open: bool,
+    pub debug_logs: Vec<String>,
+    pub debug_scroll: u16,
+
+    // Theme
+    pub theme: Theme,
+
+    // Quit signal
+    pub should_quit: bool,
+}
+#+end_src
+
+** Step 4: Implement ~update()~ in ~update.rs~
+
+Pure function: takes ~&mut Model~ and ~Message~, returns ~Vec<Command>~. All
+state transitions live here. No I/O, no channels, no rendering.
+
+Key design rules (matching iced/Elm):
+- Every ~Message~ variant has exactly one match arm.
+- State changes are immediate mutations on ~Model~.
+- Side effects are returned as ~Command~ values, never executed inline.
+- The function is testable without a terminal or network.
+
+** Step 5: Move rendering to ~view.rs~
+
+Move ~render()~, ~render_status_bar()~, ~render_output()~, ~render_input()~,
+~render_debug_panel()~, ~render_palette()~, and ~palette_commands()~ from
+~app.rs~ into ~view.rs~.
+
+The only signature change: ~fn view(frame: &mut Frame, model: &Model)~.
+
+This module is the *only* ratatui-specific code. When building a GUI, this file
+gets replaced with an iced ~view()~ function — everything else stays.
+
+** Step 6: Add event-to-message mapping
+
+A small function that converts crossterm ~Event~ into ~Message~:
+
+#+begin_src rust
+pub fn map_event(event: &event::Event, model: &Model) -> Option<Message> { ... }
+#+end_src
+
+This lives in ~event.rs~ or a new ~subscription.rs~. It reads model state (e.g.
+~palette_open~, ~is_streaming~, ~debug_mode~) to decide which message to
+produce. The function replaces the current ~handle_key()~ function.
+
+** Step 7: Refactor ~main.rs~ to the MVU runtime loop
+
+The main loop becomes:
+
+#+begin_src rust
+loop {
+    // View
+    terminal.draw(|frame| view::view(frame, &model))?;
+
+    // Wait for next event
+    tokio::select! {
+        event = events.next() => {
+            if let Some(msg) = map_event(&event?, &model) {
+                let cmds = update::update(&mut model, msg);
+                for cmd in cmds {
+                    execute_command(cmd, &req_tx);
+                }
+            }
+        }
+        Some(agent_event) = agent_rx.recv() => {
+            let msg = map_agent_event(agent_event);
+            let cmds = update::update(&mut model, msg);
+            for cmd in cmds {
+                execute_command(cmd, &req_tx);
+            }
+        }
+    }
+
+    if model.should_quit { break; }
+}
+#+end_src
+
+~execute_command()~ is the only place with side effects — it sends messages
+over channels or sets quit flags. It's the runtime's job, not the model's.
+
+** Step 8: Delete ~app.rs~, update ~lib.rs~
+
+Remove ~app.rs~. Update ~lib.rs~ to export the new modules:
+
+#+begin_src rust
+pub mod command;
+pub mod event;
+pub mod message;
+pub mod model;
+pub mod terminal;
+pub mod theme;
+pub mod update;
+pub mod view;
+#+end_src
+
+** Step 9: Verify
+
+- [ ] ~cargo build~ clean
+- [ ] ~cargo test --workspace~ all pass
+- [ ] Manual test: run ~kodo --debug~, type a message, verify streaming,
+  palette, mode toggle, debug panel all work
+
+* What stays the same for the GUI
+
+When we build the iced GUI, these modules are *reused as-is*:
+- ~model.rs~ — same state struct
+- ~message.rs~ — same message enum
+- ~update.rs~ — same update logic
+- ~command.rs~ — same command enum
+- ~theme.rs~ — colors adapt to iced styles
+
+These modules get *replaced*:
+- ~view.rs~ — ratatui rendering replaced with iced ~Element~ tree
+- ~event.rs~ — crossterm events replaced with iced subscriptions
+- ~terminal.rs~ — not needed in GUI
+
+* Notes
+
+- The ~Command~ enum will grow over time (e.g. ~SwitchProvider~, ~Undo~,
+  ~ForkSession~). Each new command adds a variant and a handler in the runtime.
+- The ~Message~ enum mirrors iced's approach where every widget interaction
+  produces a message. This is verbose but explicit — no hidden state changes.
+- ~update()~ being a free function (not a method on Model) makes it easy to
+  test: construct a Model, send a Message, assert the resulting state.
