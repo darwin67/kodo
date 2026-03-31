@@ -56,10 +56,8 @@ pub enum KeyAction {
     ToggleMode,
     /// Toggle debug panel
     ToggleDebug,
-    /// Switch to dark theme
-    DarkTheme,
-    /// Switch to light theme
-    LightTheme,
+    /// Toggle between dark and light theme
+    ToggleTheme,
     /// Quit application
     Quit,
     /// No action (for disabling keys)
@@ -95,21 +93,14 @@ impl KeyBindRegistry {
 
     /// Load default keybinds
     fn load_defaults(&mut self) {
-        // Global keybinds (work in any mode)
+        // Global keybinds (work in any mode) - all follow Ctrl+key pattern
         self.bind(KeyBind::ctrl(KeyCode::Char('c')), KeyAction::Quit);
         self.bind(KeyBind::ctrl(KeyCode::Char('k')), KeyAction::OpenPalette);
+        self.bind(KeyBind::ctrl(KeyCode::Char('q')), KeyAction::Quit);
+        self.bind(KeyBind::ctrl(KeyCode::Char('m')), KeyAction::ToggleMode);
+        self.bind(KeyBind::ctrl(KeyCode::Char('t')), KeyAction::ToggleTheme);
         self.bind(KeyBind::key(KeyCode::F(12)), KeyAction::ToggleDebug);
         self.bind(KeyBind::key(KeyCode::Tab), KeyAction::ToggleMode);
-
-        // Leader key setup (Ctrl as leader)
-        self.set_leader_key(KeyCode::Char('\x00')); // Placeholder, actual logic in is_leader_key
-
-        // Leader + key combinations (Ctrl+key)
-        self.bind_leader(KeyCode::Char('q'), KeyAction::Quit);
-        self.bind_leader(KeyCode::Char('p'), KeyAction::OpenPalette);
-        self.bind_leader(KeyCode::Char('m'), KeyAction::ToggleMode);
-        self.bind_leader(KeyCode::Char('d'), KeyAction::DarkTheme);
-        self.bind_leader(KeyCode::Char('l'), KeyAction::LightTheme);
     }
 
     /// Bind a key to an action
@@ -297,7 +288,6 @@ mod tests {
     fn test_default_bindings() {
         let registry = KeyBindRegistry::new();
         assert!(!registry.bindings.is_empty());
-        assert!(registry.leader_key.is_some());
     }
 
     #[test]

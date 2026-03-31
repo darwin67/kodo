@@ -158,9 +158,16 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
         // -- Theme --
         Message::SetTheme(choice) => {
             model.theme = match choice {
-                ThemeChoice::Dark => Theme::dark(),
-                ThemeChoice::Light => Theme::light(),
+                ThemeChoice::Dark => {
+                    model.debug_logs.push("Theme changed to Dark".to_string());
+                    Theme::dark()
+                }
+                ThemeChoice::Light => {
+                    model.debug_logs.push("Theme changed to Light".to_string());
+                    Theme::light()
+                }
             };
+            model.update_syntax_theme();
             vec![Command::None]
         }
 
@@ -303,8 +310,20 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
                     crate::keybinds::KeyAction::OpenPalette => Message::OpenPalette,
                     crate::keybinds::KeyAction::ToggleMode => Message::ToggleMode,
                     crate::keybinds::KeyAction::ToggleDebug => Message::ToggleDebugPanel,
-                    crate::keybinds::KeyAction::DarkTheme => Message::SetTheme(ThemeChoice::Dark),
-                    crate::keybinds::KeyAction::LightTheme => Message::SetTheme(ThemeChoice::Light),
+                    crate::keybinds::KeyAction::ToggleTheme => {
+                        let new_theme = if model.theme.is_dark() {
+                            model
+                                .debug_logs
+                                .push("Theme toggle: Dark -> Light".to_string());
+                            ThemeChoice::Light
+                        } else {
+                            model
+                                .debug_logs
+                                .push("Theme toggle: Light -> Dark".to_string());
+                            ThemeChoice::Dark
+                        };
+                        Message::SetTheme(new_theme)
+                    }
                     crate::keybinds::KeyAction::Quit => Message::Quit,
                     crate::keybinds::KeyAction::None => return vec![],
                 };

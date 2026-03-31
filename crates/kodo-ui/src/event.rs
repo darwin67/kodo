@@ -154,8 +154,15 @@ fn keybind_action_to_message(action: &KeyAction, model: &Model) -> Option<Messag
         }
         KeyAction::ToggleMode => Some(Message::ToggleMode),
         KeyAction::ToggleDebug => Some(Message::ToggleDebugPanel),
-        KeyAction::DarkTheme => Some(Message::SetTheme(ThemeChoice::Dark)),
-        KeyAction::LightTheme => Some(Message::SetTheme(ThemeChoice::Light)),
+        KeyAction::ToggleTheme => {
+            // Toggle between dark and light theme based on current theme
+            let new_theme = if model.theme.is_dark() {
+                ThemeChoice::Light
+            } else {
+                ThemeChoice::Dark
+            };
+            Some(Message::SetTheme(new_theme))
+        }
         KeyAction::Quit => Some(Message::Quit),
         KeyAction::None => None,
     }
