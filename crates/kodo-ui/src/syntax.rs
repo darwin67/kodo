@@ -4,12 +4,12 @@ use ratatui::{
 };
 use syntect::{
     easy::HighlightLines,
-    highlighting::{HighlightState, Theme, ThemeSet},
-    parsing::{SyntaxReference, SyntaxSet},
-    util::as_24_bit_terminal_escaped,
+    highlighting::{Theme, ThemeSet},
+    parsing::SyntaxSet,
 };
 
 /// Syntax highlighter for code blocks
+#[derive(Debug)]
 pub struct SyntaxHighlighter {
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
