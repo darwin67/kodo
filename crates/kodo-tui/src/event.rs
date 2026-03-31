@@ -167,7 +167,6 @@ fn map_input_events(key: &KeyEvent) -> Option<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::Theme;
 
     fn test_model() -> Model {
         Model::new(false)

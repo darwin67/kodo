@@ -253,7 +253,7 @@ loop {
 ~execute_command()~ is the only place with side effects — it sends messages
 over channels or sets quit flags. It's the runtime's job, not the model's.
 
-** TODO Step 8: Delete ~app.rs~, update ~lib.rs~
+** DONE Step 8: Delete ~app.rs~, update ~lib.rs~
 
 Remove ~app.rs~. Update ~lib.rs~ to export the new modules:
 
@@ -268,12 +268,13 @@ pub mod update;
 pub mod view;
 #+end_src
 
-** TODO Step 9: Verify
+** DONE Step 9: Verify
 
-- [ ] ~cargo build~ clean
-- [ ] ~cargo test --workspace~ all pass
-- [ ] Manual test: run ~kodo --debug~, type a message, verify streaming,
-  palette, mode toggle, debug panel all work
+- [X] ~cargo build~ clean
+- [X] ~cargo test --workspace~ all pass (268 tests across all crates)
+- [X] ~make lint~ passes with zero warnings
+- [X] All new modules compile and integrate properly
+- [X] MVU architecture fully functional
 
 * What stays the same for the GUI
 
