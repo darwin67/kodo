@@ -71,7 +71,7 @@ change.
 
 * Step-by-step plan
 
-** TODO Step 1: Define ~Message~ enum in ~message.rs~
+** DONE Step 1: Define ~Message~ enum in ~message.rs~
 
 All possible state changes, replacing the ~Action~ enum and inline agent event
 handling in main.rs:
@@ -126,7 +126,7 @@ pub enum Message {
 }
 #+end_src
 
-** TODO Step 2: Define ~Command~ enum in ~command.rs~
+** DONE Step 2: Define ~Command~ enum in ~command.rs~
 
 Side effects that ~update()~ can request. The runtime loop executes them.
 
@@ -141,7 +141,7 @@ pub enum Command {
 }
 #+end_src
 
-** TODO Step 3: Extract ~Model~ struct in ~model.rs~
+** DONE Step 3: Extract ~Model~ struct in ~model.rs~
 
 Move all state fields from ~App~ into ~Model~. No methods that perform side
 effects — only data and simple derived queries.
@@ -184,7 +184,7 @@ pub struct Model {
 }
 #+end_src
 
-** TODO Step 4: Implement ~update()~ in ~update.rs~
+** DONE Step 4: Implement ~update()~ in ~update.rs~
 
 Pure function: takes ~&mut Model~ and ~Message~, returns ~Vec<Command>~. All
 state transitions live here. No I/O, no channels, no rendering.
@@ -195,7 +195,7 @@ Key design rules (matching iced/Elm):
 - Side effects are returned as ~Command~ values, never executed inline.
 - The function is testable without a terminal or network.
 
-** TODO Step 5: Move rendering to ~view.rs~
+** DONE Step 5: Move rendering to ~view.rs~
 
 Move ~render()~, ~render_status_bar()~, ~render_output()~, ~render_input()~,
 ~render_debug_panel()~, ~render_palette()~, and ~palette_commands()~ from
@@ -206,7 +206,7 @@ The only signature change: ~fn view(frame: &mut Frame, model: &Model)~.
 This module is the *only* ratatui-specific code. When building a GUI, this file
 gets replaced with an iced ~view()~ function — everything else stays.
 
-** TODO Step 6: Add event-to-message mapping
+** DONE Step 6: Add event-to-message mapping
 
 A small function that converts crossterm ~Event~ into ~Message~:
 

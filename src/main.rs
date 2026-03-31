@@ -11,9 +11,13 @@ use kodo_llm::gemini::GeminiProvider;
 use kodo_llm::ollama::OllamaProvider;
 use kodo_llm::openai::OpenAiProvider;
 use kodo_llm::provider::Provider;
-use kodo_tui::app::{self, Action, App, ChatRole};
-use kodo_tui::event::EventHandler;
-use kodo_tui::theme::Theme;
+use kodo_tui::command::Command;
+use kodo_tui::event::{EventHandler, map_event};
+use kodo_tui::message::Message;
+use kodo_tui::model::Model;
+use kodo_tui::terminal::{init_terminal, restore_terminal};
+use kodo_tui::update::update;
+use kodo_tui::view::view;
 
 #[derive(Parser)]
 #[command(name = "kodo", about = "A coding agent for your terminal")]
@@ -52,6 +56,8 @@ fn default_model(provider_name: &str) -> &str {
 }
 
 /// Messages sent from the TUI event loop to the agent task.
+/// Agent communication types
+#[derive(Debug)]
 enum AgentRequest {
     ProcessMessage(String),
     Quit,
@@ -79,26 +85,29 @@ async fn main() -> Result<()> {
     let mut agent = Agent::new(provider).with_model(&model);
     kodo_tools::register_builtin_tools(agent.tool_registry_mut());
 
-    // Initialize TUI.
-    let mut terminal = app::init_terminal()?;
+    // Initialize terminal
+    let mut terminal = init_terminal()?;
     let mut events = EventHandler::new(Duration::from_millis(100));
 
-    let mut tui_app = App::new();
-    tui_app.provider = agent.provider_name().to_string();
-    tui_app.model = agent.model().to_string();
-    tui_app.mode = agent.mode.to_string();
-    tui_app.debug_mode = cli.debug;
+    // Initialize application state (Model) following Elm Architecture
+    let mut model = Model::new(cli.debug);
+    model.provider = agent.provider_name().to_string();
+    model.model_name = agent.model().to_string();
+    model.mode = agent.mode.to_string();
+
     if cli.debug {
-        tui_app.debug_panel_open = true;
-        tui_app.push_debug_log("Debug mode enabled. Toggle panel with Ctrl+\\");
+        model.debug_panel_open = true;
+        model
+            .debug_logs
+            .push("Debug mode enabled. Toggle panel with F12".to_string());
     }
 
-    // Channel for agent events -> TUI.
+    // Channel for agent events -> TUI
     let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
-    // Channel for TUI -> agent requests.
+    // Channel for TUI -> agent requests
     let (req_tx, mut req_rx) = mpsc::unbounded_channel::<AgentRequest>();
 
-    // Spawn agent task.
+    // Spawn agent task
     let agent_event_tx = agent_tx.clone();
     tokio::spawn(async move {
         while let Some(request) = req_rx.recv().await {
@@ -107,7 +116,7 @@ async fn main() -> Result<()> {
                     if let Err(e) = agent.process_message(&input, Some(&agent_event_tx)).await {
                         let _ = agent_event_tx.send(AgentEvent::Error(format!("{e:#}")));
                     }
-                    // Always send Done so the TUI knows processing finished.
+                    // Always send Done so the TUI knows processing finished
                     let _ = agent_event_tx.send(AgentEvent::Done);
                 }
                 AgentRequest::Quit => break,
@@ -115,110 +124,86 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Main TUI event loop.
+    // Main MVU (Model-View-Update) runtime loop following Elm Architecture
     loop {
-        // Draw.
-        terminal.draw(|frame| app::render(frame, &tui_app))?;
+        // VIEW: Render current model state
+        terminal.draw(|frame| view(frame, &model))?;
 
-        // Process events with a non-blocking select.
+        // HANDLE EVENTS: Process input and agent events
         tokio::select! {
-            // Terminal/keyboard events.
-            event = events.next() => {
-                let event = event?;
-                let action = app::handle_key(&mut tui_app, &event);
+            // Terminal/keyboard events -> Messages -> Update
+            event_result = events.next() => {
+                let event = event_result?;
 
-                match action {
-                    Action::Submit(input) => {
-                        tui_app.push_message(ChatRole::User, &input);
-                        tui_app.is_streaming = true;
-                        tui_app.streaming_text.clear();
-                        let _ = req_tx.send(AgentRequest::ProcessMessage(input));
+                // Map crossterm Event to application Message
+                if let Some(message) = map_event(&event, &model) {
+                    // UPDATE: Pure function that modifies model and returns commands
+                    let commands = update(&mut model, message);
+
+                    // EXECUTE COMMANDS: Handle side effects
+                    for command in commands {
+                        execute_command(command, &req_tx).await;
                     }
-                    Action::Quit => {
-                        let _ = req_tx.send(AgentRequest::Quit);
-                        break;
-                    }
-                    Action::ToggleMode => {
-                        let new_mode = if tui_app.mode == "plan" { "build" } else { "plan" };
-                        tui_app.mode = new_mode.into();
-                        tui_app.push_debug_log(format!("Mode toggled to {new_mode}"));
-                    }
-                    Action::ToggleDebugPanel => {
-                        tui_app.debug_panel_open = !tui_app.debug_panel_open;
-                    }
-                    Action::PaletteCommand(cmd) => {
-                        tui_app.push_debug_log(format!("Palette command: {cmd}"));
-                        handle_palette_command(&mut tui_app, &cmd);
-                    }
-                    Action::None => {}
                 }
             }
-            // Agent events (streaming text, tool status, etc.).
+
+            // Agent events -> Messages -> Update
             Some(agent_event) = agent_rx.recv() => {
-                // Log all agent events to debug panel.
-                tui_app.push_debug_log(format!("{agent_event:?}"));
+                // Map AgentEvent to application Message
+                let message = map_agent_event(agent_event);
 
-                match agent_event {
-                    AgentEvent::TextDelta(text) => {
-                        tui_app.append_streaming(&text);
-                    }
-                    AgentEvent::TextDone => {
-                        tui_app.finish_streaming();
-                    }
-                    AgentEvent::ToolStart { name } => {
-                        tui_app.push_message(ChatRole::Tool, format!("[{name}]"));
-                    }
-                    AgentEvent::ToolDone { name, success } => {
-                        let status = if success { "done" } else { "failed" };
-                        tui_app.push_message(ChatRole::Tool, format!("[{name}: {status}]"));
-                    }
-                    AgentEvent::ToolDenied { name, reason } => {
-                        tui_app.push_message(ChatRole::Tool, format!("[denied: {name}] {reason}"));
-                    }
-                    AgentEvent::ToolCancelled { name } => {
-                        tui_app.push_message(ChatRole::Tool, format!("[cancelled: {name}]"));
-                    }
-                    AgentEvent::Formatted { message } => {
-                        tui_app.push_message(ChatRole::Tool, format!("[fmt: {message}]"));
-                    }
-                    AgentEvent::Error(msg) => {
-                        tui_app.push_message(ChatRole::System, format!("Error: {msg}"));
-                        tui_app.is_streaming = false;
-                    }
-                    AgentEvent::Done => {
-                        if tui_app.is_streaming {
-                            tui_app.finish_streaming();
-                        }
-                    }
+                // UPDATE: Pure function that modifies model and returns commands
+                let commands = update(&mut model, message);
+
+                // EXECUTE COMMANDS: Handle side effects
+                for command in commands {
+                    execute_command(command, &req_tx).await;
                 }
             }
+        }
+
+        // Check if application should quit
+        if model.should_quit {
+            let _ = req_tx.send(AgentRequest::Quit);
+            break;
         }
     }
 
-    // Restore terminal.
-    app::restore_terminal(&mut terminal)?;
-
+    // Cleanup: Restore terminal to normal mode
+    restore_terminal(&mut terminal)?;
     Ok(())
 }
 
-fn handle_palette_command(app: &mut App, cmd: &str) {
-    match cmd {
-        "Dark Theme" => {
-            app.theme = Theme::dark();
-            app.push_message(ChatRole::System, "Switched to dark theme.");
+/// Execute Commands returned by update() - this is where side effects happen.
+/// The update() function is pure, but Commands describe side effects that
+/// the runtime must perform (sending messages to agents, quitting, etc).
+async fn execute_command(command: Command, req_tx: &mpsc::UnboundedSender<AgentRequest>) {
+    match command {
+        Command::SendToAgent(message) => {
+            let _ = req_tx.send(AgentRequest::ProcessMessage(message));
         }
-        "Light Theme" => {
-            app.theme = Theme::light();
-            app.push_message(ChatRole::System, "Switched to light theme.");
+        Command::Quit => {
+            let _ = req_tx.send(AgentRequest::Quit);
         }
-        "Quit" => {
-            app.should_quit = true;
+        Command::None => {
+            // No-op
         }
-        _ => {
-            app.push_message(
-                ChatRole::System,
-                format!("Command not yet implemented: {cmd}"),
-            );
-        }
+    }
+}
+
+/// Map AgentEvent to application Message.
+/// This converts external agent events into internal application messages
+/// that can be processed by the pure update() function.
+fn map_agent_event(event: AgentEvent) -> Message {
+    match event {
+        AgentEvent::TextDelta(chunk) => Message::AgentTextDelta(chunk),
+        AgentEvent::TextDone => Message::AgentTextDone,
+        AgentEvent::ToolStart { name } => Message::AgentToolStart { name },
+        AgentEvent::ToolDone { name, success } => Message::AgentToolDone { name, success },
+        AgentEvent::ToolDenied { name, reason } => Message::AgentToolDenied { name, reason },
+        AgentEvent::ToolCancelled { name } => Message::AgentToolCancelled { name },
+        AgentEvent::Formatted { message } => Message::AgentFormatted { message },
+        AgentEvent::Error(error) => Message::AgentError(error),
+        AgentEvent::Done => Message::AgentDone,
     }
 }
