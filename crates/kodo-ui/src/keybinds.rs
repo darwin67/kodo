@@ -101,10 +101,10 @@ impl KeyBindRegistry {
         self.bind(KeyBind::key(KeyCode::F(12)), KeyAction::ToggleDebug);
         self.bind(KeyBind::key(KeyCode::Tab), KeyAction::ToggleMode);
 
-        // Leader key setup (backtick as leader by default - won't interfere with typing)
-        self.set_leader_key(KeyCode::Char('`'));
+        // Leader key setup (semicolon as leader by default - easy to reach, rarely used alone)
+        self.set_leader_key(KeyCode::Char(';'));
 
-        // Leader + key combinations (` + key)
+        // Leader + key combinations (; + key)
         self.bind_leader(KeyCode::Char('q'), KeyAction::Quit);
         self.bind_leader(KeyCode::Char('p'), KeyAction::OpenPalette);
         self.bind_leader(KeyCode::Char('m'), KeyAction::ToggleMode);
