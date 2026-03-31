@@ -12,8 +12,8 @@ use crate::db::DbPool;
 /// A thread is considered "live" if its heartbeat is within this many seconds.
 pub const HEARTBEAT_STALE_SECS: i64 = 60;
 
-/// Recommended heartbeat interval (half the staleness threshold).
-pub const HEARTBEAT_INTERVAL_SECS: u64 = 30;
+/// Recommended heartbeat interval.
+pub const HEARTBEAT_INTERVAL_SECS: u64 = 20;
 
 // ---------------------------------------------------------------------------
 // ID generation
