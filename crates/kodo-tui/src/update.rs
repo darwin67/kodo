@@ -100,11 +100,20 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
         // -- Mode --
         Message::ToggleMode => {
             // Toggle between Plan and Build mode
-            model.mode = if model.mode == "Plan" {
+            let new_mode = if model.mode == "Plan" {
                 "Build".to_string()
             } else {
                 "Plan".to_string()
             };
+            model.mode = new_mode.clone();
+
+            // Log mode change to debug panel if debug mode is enabled
+            if model.debug_mode {
+                model
+                    .debug_logs
+                    .push(format!("🔄 Mode toggled to {}", new_mode));
+            }
+
             vec![Command::None]
         }
 
@@ -159,6 +168,12 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
         Message::ToggleDebugPanel => {
             if model.debug_mode {
                 model.debug_panel_open = !model.debug_panel_open;
+                let status = if model.debug_panel_open {
+                    "opened"
+                } else {
+                    "closed"
+                };
+                model.debug_logs.push(format!("🔍 Debug panel {}", status));
             }
             vec![Command::None]
         }
