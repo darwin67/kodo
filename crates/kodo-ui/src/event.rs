@@ -6,6 +6,7 @@ use crossterm::event::{
 };
 use tokio::sync::mpsc;
 
+use crate::keybinds::KeyAction;
 use crate::message::{Message, ThemeChoice};
 use crate::model::Model;
 
@@ -91,45 +92,72 @@ pub fn map_event(event: &Event, model: &Model) -> Option<Message> {
 
 /// Map keyboard input to Messages based on current application state
 fn map_key_event(key: &KeyEvent, model: &Model) -> Option<Message> {
-    match (key.code, key.modifiers) {
-        // Global shortcuts (work regardless of state)
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(Message::Quit),
-        (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
+    // Check for leader key sequences first
+    if model.leader_state.waiting_for_sequence {
+        return handle_leader_sequence(key, model);
+    }
+
+    // Check if this is a leader key
+    if model.keybinds.is_leader_key(key) {
+        return Some(Message::StartLeaderSequence);
+    }
+
+    // Check for global keybind actions first (they work even in palette)
+    if let Some(action) = model.keybinds.get_action(key) {
+        return keybind_action_to_message(action, model);
+    }
+
+    // Handle Escape - context sensitive
+    if matches!(key.code, KeyCode::Esc) && key.modifiers == KeyModifiers::NONE {
+        if model.palette_open {
+            return Some(Message::ClosePalette);
+        } else {
+            return None; // Ignore in other contexts
+        }
+    }
+
+    // Command palette input handling (for non-global keys)
+    if model.palette_open {
+        return map_palette_input(key);
+    }
+
+    // Input field handling (when not in palette and not streaming)
+    if !model.is_streaming {
+        return map_input_events(key);
+    }
+
+    // Ignore all input while streaming
+    None
+}
+
+/// Handle leader key sequences
+fn handle_leader_sequence(key: &KeyEvent, model: &Model) -> Option<Message> {
+    if let Some(_action) = model.keybinds.get_leader_action(key.code) {
+        // Execute the leader action and cancel the sequence
+        Some(Message::ExecuteLeaderAction(key.code))
+    } else {
+        // Invalid sequence - cancel it
+        Some(Message::CancelLeaderSequence)
+    }
+}
+
+/// Convert a KeyAction to a Message
+fn keybind_action_to_message(action: &KeyAction, model: &Model) -> Option<Message> {
+    match action {
+        KeyAction::Message(msg) => Some(msg.clone()),
+        KeyAction::OpenPalette => {
             if model.palette_open {
                 Some(Message::ClosePalette)
             } else {
                 Some(Message::OpenPalette)
             }
         }
-        (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
-            // Toggle theme
-            let new_theme = if model.theme.name == "dark" {
-                ThemeChoice::Light
-            } else {
-                ThemeChoice::Dark
-            };
-            Some(Message::SetTheme(new_theme))
-        }
-        (KeyCode::F(12), KeyModifiers::NONE) => Some(Message::ToggleDebugPanel),
-        (KeyCode::Tab, KeyModifiers::NONE) => Some(Message::ToggleMode),
-
-        // Handle Escape - context sensitive
-        (KeyCode::Esc, KeyModifiers::NONE) => {
-            if model.palette_open {
-                Some(Message::ClosePalette)
-            } else {
-                None // Ignore in other contexts
-            }
-        }
-
-        // Command palette input handling
-        _ if model.palette_open => map_palette_input(key),
-
-        // Input field handling (when not in palette)
-        _ if !model.is_streaming => map_input_events(key),
-
-        // Ignore all input while streaming
-        _ => None,
+        KeyAction::ToggleMode => Some(Message::ToggleMode),
+        KeyAction::ToggleDebug => Some(Message::ToggleDebugPanel),
+        KeyAction::DarkTheme => Some(Message::SetTheme(ThemeChoice::Dark)),
+        KeyAction::LightTheme => Some(Message::SetTheme(ThemeChoice::Light)),
+        KeyAction::Quit => Some(Message::Quit),
+        KeyAction::None => None,
     }
 }
 

@@ -2,7 +2,7 @@
 /// Following the Elm Architecture pattern, Messages are the ONLY way
 /// to modify the application state. They describe what happened, not
 /// how to handle it (that's the job of update()).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Message {
     // -- Input events --
     /// User typed a character in the input field
@@ -53,6 +53,14 @@ pub enum Message {
     // -- Debug --
     /// Toggle debug panel visibility (F12)
     ToggleDebugPanel,
+
+    // -- Keybinds --
+    /// Start waiting for leader key sequence
+    StartLeaderSequence,
+    /// Execute a leader key action
+    ExecuteLeaderAction(crossterm::event::KeyCode),
+    /// Cancel current leader sequence
+    CancelLeaderSequence,
 
     // -- Agent lifecycle --
     /// Agent is streaming text tokens

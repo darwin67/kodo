@@ -264,7 +264,11 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
 
         // -- System --
         Message::Tick => {
-            // Periodic update - could be used for animations, timeouts, etc.
+            // Check for leader sequence timeout
+            if model.leader_state.check_timeout() {
+                // Leader sequence timed out - no need to update UI, just cancel
+            }
+            // Periodic update - could be used for animations, etc.
             vec![Command::None]
         }
 
@@ -282,6 +286,37 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
         Message::Quit => {
             model.should_quit = true;
             vec![Command::Quit]
+        }
+
+        // -- Keybinds --
+        Message::StartLeaderSequence => {
+            model.leader_state.start_sequence();
+            vec![]
+        }
+
+        Message::ExecuteLeaderAction(key) => {
+            model.leader_state.cancel_sequence();
+            if let Some(action) = model.keybinds.get_leader_action(key) {
+                // Convert action to a message and recursively handle it
+                let msg = match action {
+                    crate::keybinds::KeyAction::Message(msg) => msg.clone(),
+                    crate::keybinds::KeyAction::OpenPalette => Message::OpenPalette,
+                    crate::keybinds::KeyAction::ToggleMode => Message::ToggleMode,
+                    crate::keybinds::KeyAction::ToggleDebug => Message::ToggleDebugPanel,
+                    crate::keybinds::KeyAction::DarkTheme => Message::SetTheme(ThemeChoice::Dark),
+                    crate::keybinds::KeyAction::LightTheme => Message::SetTheme(ThemeChoice::Light),
+                    crate::keybinds::KeyAction::Quit => Message::Quit,
+                    crate::keybinds::KeyAction::None => return vec![],
+                };
+                update(model, msg)
+            } else {
+                vec![]
+            }
+        }
+
+        Message::CancelLeaderSequence => {
+            model.leader_state.cancel_sequence();
+            vec![]
         }
     }
 }

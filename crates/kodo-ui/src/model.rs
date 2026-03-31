@@ -1,4 +1,8 @@
-use crate::{syntax::SyntaxHighlighter, theme::Theme};
+use crate::{
+    keybinds::{KeyBindRegistry, LeaderState},
+    syntax::SyntaxHighlighter,
+    theme::Theme,
+};
 
 /// A message in the conversation display.
 /// Represents both user inputs and agent responses.
@@ -74,6 +78,10 @@ pub struct Model {
     pub theme: Theme,
     /// Syntax highlighter for code blocks (lazy-initialized)
     pub syntax_highlighter: Option<SyntaxHighlighter>,
+    /// Keybind registry for customizable shortcuts
+    pub keybinds: KeyBindRegistry,
+    /// State for handling leader key sequences
+    pub leader_state: LeaderState,
 
     // -- Application lifecycle --
     /// Whether the application should terminate
@@ -116,6 +124,8 @@ impl Model {
             // UI state
             theme: Theme::dark(),
             syntax_highlighter: None, // Lazy-initialized
+            keybinds: KeyBindRegistry::new(),
+            leader_state: LeaderState::new(1000), // 1 second timeout
 
             // Application lifecycle
             should_quit: false,
