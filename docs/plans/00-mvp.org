@@ -264,9 +264,14 @@ Expand to full OpenCode parity later (30+ formatters).
 
 Tables:
 - *sessions* — id, directory, branch, created_at, updated_at
-- *messages* — id, session_id, role, content, tool_calls, tool_results, created_at
-- *checkpoints* — id, session_id, file_path, content_snapshot, created_at
-- *auth_tokens* — id, provider, token, refresh_token, expires_at
+  A session is a shared context space. No provider/model — those belong to threads.
+- *threads* — id, session_id, role, provider, model, created_at, updated_at
+  A conversation track within a session. Each thread has its own model.
+  Multiple threads can coexist (e.g. planner=opus, executor=sonnet, debugger=gpt-4o).
+- *messages* — id, thread_id, role, content, created_at
+  Messages belong to a thread, not directly to a session.
+- *auth_tokens* — id, provider (unique), token, refresh_token, expires_at
+  Secrets stored in OS keychain (macOS Keychain, Linux keyutils). DB stores metadata only.
 - *memory* — id, key, value, scope (global/project), created_at
 
 * Key Dependencies
