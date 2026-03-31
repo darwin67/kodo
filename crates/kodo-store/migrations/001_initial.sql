@@ -7,19 +7,24 @@ CREATE TABLE IF NOT EXISTS sessions (
     name        TEXT NOT NULL,
     directory   TEXT NOT NULL,
     branch      TEXT,
+    status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'archived')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name);
+CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 
 -- Threads: a conversation track within a session.
+-- heartbeat_at is updated periodically by the attached process.
+-- A thread is "live" if heartbeat_at is within the staleness threshold.
 CREATE TABLE IF NOT EXISTS threads (
-    id          TEXT PRIMARY KEY,
-    session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    role        TEXT NOT NULL DEFAULT 'default',
-    provider    TEXT NOT NULL,
-    model       TEXT NOT NULL,
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    id            TEXT PRIMARY KEY,
+    session_id    TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    role          TEXT NOT NULL DEFAULT 'default',
+    provider      TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    heartbeat_at  TEXT,
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_threads_session ON threads(session_id);
