@@ -1389,6 +1389,7 @@ dependencies = [
  "kodo-tools",
  "pin-project-lite",
  "regex",
+ "scopeguard",
  "serde",
  "serde_json",
  "tempfile",

@@ -19,6 +19,8 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 regex = { workspace = true }
+uuid = { workspace = true }
+scopeguard = "1"
 
 [dev-dependencies]
 tempfile = "3"

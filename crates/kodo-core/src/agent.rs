@@ -168,6 +168,18 @@ impl Agent {
         self.checkpoints.undo_last().await
     }
 
+    pub fn set_system_prompt(&mut self, prompt: &str) {
+        self.system_prompt = prompt.to_string();
+    }
+
+    pub fn add_message(&mut self, message: Message) {
+        self.messages.push(message);
+    }
+
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
     /// Process a user message through the agentic loop.
     /// Emits `AgentEvent`s to the provided sender for UI rendering.
     /// If no sender is provided, events are silently discarded (headless mode).
