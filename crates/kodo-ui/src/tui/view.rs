@@ -6,7 +6,14 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
-use crate::model::{ChatRole, Model};
+use crate::{
+    model::{ChatRole, Model},
+    syntax::{MarkdownParser, SyntaxHighlighter},
+};
+
+// Global syntax highlighter - initialized once
+use std::sync::OnceLock;
+static SYNTAX_HIGHLIGHTER: OnceLock<SyntaxHighlighter> = OnceLock::new();
 
 /// Main view function following the Elm Architecture.
 /// This is a PURE function that takes the model and renders it to the terminal.
@@ -96,6 +103,13 @@ fn render_status_bar(frame: &mut Frame, model: &Model, area: Rect) {
 fn render_output(frame: &mut Frame, model: &Model, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
+    // Get or initialize the global syntax highlighter
+    let highlighter = SYNTAX_HIGHLIGHTER.get_or_init(|| {
+        let mut h = SyntaxHighlighter::new();
+        h.set_theme(model.theme.is_dark());
+        h
+    });
+
     // Render existing messages
     for msg in &model.messages {
         let (prefix, style) = match msg.role {
@@ -105,19 +119,30 @@ fn render_output(frame: &mut Frame, model: &Model, area: Rect) {
             ChatRole::System => ("", model.theme.muted_style()),
         };
 
-        // Handle multi-line messages with proper indentation
-        for (i, line) in msg.content.lines().enumerate() {
+        // Parse message content with syntax highlighting for assistant messages
+        let content_lines = if matches!(msg.role, ChatRole::Assistant) {
+            MarkdownParser::parse_with_syntax(&msg.content, highlighter)
+        } else {
+            // For non-assistant messages, use simple line splitting
+            msg.content
+                .lines()
+                .map(|line| Line::from(line.to_string()))
+                .collect()
+        };
+
+        // Add prefix to first line and indent subsequent lines
+        for (i, content_line) in content_lines.into_iter().enumerate() {
             if i == 0 {
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, style.add_modifier(Modifier::BOLD)),
-                    Span::styled(line, style),
-                ]));
+                // First line gets the role prefix
+                let mut spans = vec![Span::styled(prefix, style.add_modifier(Modifier::BOLD))];
+                spans.extend(content_line.spans);
+                lines.push(Line::from(spans));
             } else {
+                // Subsequent lines get indented
                 let indent = " ".repeat(prefix.len());
-                lines.push(Line::from(vec![
-                    Span::raw(indent),
-                    Span::styled(line, style),
-                ]));
+                let mut spans = vec![Span::raw(indent)];
+                spans.extend(content_line.spans);
+                lines.push(Line::from(spans));
             }
         }
         lines.push(Line::raw("")); // Blank line between messages
@@ -126,19 +151,24 @@ fn render_output(frame: &mut Frame, model: &Model, area: Rect) {
     // Show streaming text if active
     if model.is_streaming && !model.streaming_text.is_empty() {
         let style = model.theme.assistant_style();
-        for (i, line) in model.streaming_text.lines().enumerate() {
+        let prefix = "kodo> ";
+
+        // Parse streaming text with syntax highlighting
+        let content_lines = MarkdownParser::parse_with_syntax(&model.streaming_text, highlighter);
+
+        for (i, content_line) in content_lines.into_iter().enumerate() {
             if i == 0 {
-                lines.push(Line::from(vec![
-                    Span::styled("kodo> ", style.add_modifier(Modifier::BOLD)),
-                    Span::styled(line, style),
-                ]));
+                let mut spans = vec![Span::styled(prefix, style.add_modifier(Modifier::BOLD))];
+                spans.extend(content_line.spans);
+                lines.push(Line::from(spans));
             } else {
-                lines.push(Line::from(vec![
-                    Span::raw("      "), // Indent to match "kodo> "
-                    Span::styled(line, style),
-                ]));
+                let indent = " ".repeat(prefix.len());
+                let mut spans = vec![Span::raw(indent)];
+                spans.extend(content_line.spans);
+                lines.push(Line::from(spans));
             }
         }
+
         // Blinking cursor indicator
         lines.push(Line::from(Span::styled(
             "      ...",

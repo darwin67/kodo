@@ -108,6 +108,11 @@ impl Theme {
     pub fn tool_style(&self) -> Style {
         Style::default().fg(self.tool_call)
     }
+
+    /// Check if this is a dark theme.
+    pub fn is_dark(&self) -> bool {
+        self.name == "dark"
+    }
 }
 
 impl Default for Theme {
