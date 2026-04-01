@@ -1,0 +1,185 @@
+# Kodo Configuration Example
+# Copy this to kodo.toml or .kodo.toml to customize your setup
+
+[general]
+# Default provider: anthropic, openai, gemini, ollama
+default-provider = "anthropic"
+
+# Default model for the provider
+default-model = "claude-sonnet-4-20250514"
+
+# Default mode: plan (read-only) or build (full access)
+default-mode = "build"
+
+# Maximum concurrent subagents
+max-subagents = 5
+
+# Enable debug logging
+debug = false
+
+# Session storage directory (defaults to system data dir)
+# session-dir = "~/.local/share/kodo/sessions"
+
+# Provider-specific settings
+[providers.anthropic]
+# API key can be set here or via ANTHROPIC_API_KEY env var
+# api-key = "sk-..."
+
+# Enable prompt caching for better performance
+enable-caching = true
+
+# Custom timeout in seconds
+timeout = 300
+
+[providers.openai]
+# api-key = "sk-..."
+# default-model = "gpt-4o"
+# base-url = "https://api.openai.com/v1"  # For API-compatible services
+
+[providers.gemini]
+# api-key = "..."
+# default-model = "gemini-1.5-pro"
+
+[providers.ollama]
+# No API key needed for local models
+default-model = "llama3.1"
+base-url = "http://localhost:11434"
+
+# LSP server configurations
+[lsp-servers.rust-analyzer]
+command = "rust-analyzer"
+extensions = ["rs"]
+# Auto-install if not found
+install-command = "rustup component add rust-analyzer"
+
+[lsp-servers.typescript]
+command = "typescript-language-server"
+args = ["--stdio"]
+extensions = ["ts", "tsx", "js", "jsx"]
+install-command = "npm install -g typescript typescript-language-server"
+
+[lsp-servers.python]
+command = "pyright-langserver"
+args = ["--stdio"]
+extensions = ["py", "pyi"]
+install-command = "pip install pyright"
+
+[lsp-servers.gopls]
+command = "gopls"
+extensions = ["go"]
+install-command = "go install golang.org/x/tools/gopls@latest"
+
+# Custom LSP server example
+[lsp-servers.custom-lsp]
+command = "/usr/local/bin/my-lsp"
+args = ["--stdio", "--config", "/etc/my-lsp.conf"]
+extensions = ["xyz"]
+[lsp-servers.custom-lsp.env]
+MY_LSP_OPTION = "value"
+
+# Formatter configurations
+[formatters.rustfmt]
+command = "rustfmt"
+args = ["--edition", "2024", "{file}"]
+extensions = ["rs"]
+format-on-save = true
+
+[formatters.prettier]
+command = "prettier"
+args = ["--write", "{file}"]
+extensions = ["js", "ts", "jsx", "tsx", "json", "md", "yaml", "yml", "html", "css"]
+format-on-save = true
+timeout = 10
+
+[formatters.black]
+command = "black"
+args = ["{file}"]
+extensions = ["py", "pyi"]
+format-on-save = true
+
+[formatters.gofmt]
+command = "gofmt"
+args = ["-w", "{file}"]
+extensions = ["go"]
+format-on-save = true
+
+# Tool-specific settings
+[tools.shell]
+# Shell to use: bash, zsh, fish, sh
+shell = "bash"
+shell-args = ["-c"]
+timeout = 300  # 5 minutes
+
+# Dangerous commands that require confirmation
+dangerous-patterns = [
+    "rm -rf",
+    "sudo",
+    "chmod 777",
+    "git push --force",
+    ":(){:|:&};:"  # fork bomb
+]
+
+[tools.shell.env]
+# Custom environment variables for shell commands
+# MY_VAR = "value"
+
+[tools.file-ops]
+# Maximum file size to read (10MB)
+max-file-size = 10485760
+
+# Directories to exclude from operations
+excluded-dirs = [".git", "node_modules", "target", ".venv", "__pycache__"]
+
+# File patterns to exclude
+excluded-patterns = ["*.pyc", "*.pyo", "*.so", "*.dylib"]
+
+# Create backups before editing
+create-backups = false
+
+[tools.web-fetch]
+# User agent for web requests
+user-agent = "Kodo/0.1.0"
+
+# Request timeout in seconds
+timeout = 30
+
+# Maximum response size (50MB)
+max-response-size = 52428800
+
+# Restrict to specific domains (empty = all allowed)
+# allowed-domains = ["github.com", "docs.rs", "crates.io"]
+
+[tools.web-fetch.headers]
+# Custom headers for all web requests
+# Authorization = "Bearer token"
+
+# Disabled tools (won't be available to the agent)
+# tools.disabled = ["shell", "web_fetch"]
+
+# UI/TUI configuration
+[ui]
+# Color theme: dark or light
+theme = "dark"
+
+# Enable mouse support
+mouse = true
+
+# Show status bar
+status-bar = true
+
+# Show line numbers in code blocks
+line-numbers = true
+
+# Leader key for command palette
+leader-key = "ctrl-k"
+
+# Leader timeout in milliseconds
+leader-timeout = 2000
+
+# Custom keybindings
+[ui.keybinds]
+# Format: "key-combo" = "action"
+# Actions: quit, submit, toggle-mode, open-palette, toggle-debug
+# "ctrl-q" = "quit"
+# "ctrl-s" = "save-session"
+# "alt-m" = "toggle-mode"

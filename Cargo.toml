@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/kodo-auth",
+    "crates/kodo-config",
     "crates/kodo-core",
     "crates/kodo-llm",
     "crates/kodo-tools",
@@ -19,6 +20,7 @@ license = "MIT"
 [workspace.dependencies]
 # Internal crates
 kodo-auth = { path = "crates/kodo-auth" }
+kodo-config = { path = "crates/kodo-config" }
 kodo-core = { path = "crates/kodo-core" }
 kodo-llm = { path = "crates/kodo-llm" }
 kodo-tools = { path = "crates/kodo-tools" }

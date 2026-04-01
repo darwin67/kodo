@@ -63,8 +63,9 @@ impl OAuthProvider {
     fn generate_pkce() -> (String, String) {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
+        let mut rng = rand::thread_rng();
         let mut verifier_bytes = [0u8; 32];
-        rand::thread_rng().fill(&mut verifier_bytes);
+        rng.fill_bytes(&mut verifier_bytes);
         let verifier = URL_SAFE_NO_PAD.encode(&verifier_bytes);
 
         let mut hasher = Sha256::new();
@@ -78,8 +79,9 @@ impl OAuthProvider {
     fn generate_state() -> String {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
+        let mut rng = rand::thread_rng();
         let mut state_bytes = [0u8; 16];
-        rand::thread_rng().fill(&mut state_bytes);
+        rng.fill_bytes(&mut state_bytes);
         URL_SAFE_NO_PAD.encode(&state_bytes)
     }
 }
