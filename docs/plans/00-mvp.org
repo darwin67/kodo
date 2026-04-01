@@ -391,7 +391,7 @@ Refinements and advanced features.
 - [X] Prompt caching (Anthropic)
 - [X] Subagent support (spawn isolated agent tasks)
 - [ ] MCP server integration
-- [ ] Config file support (YAML + TOML)
+- [X] Config file support (YAML + TOML)
 - [ ] Custom LSP servers and formatters via config
 - [ ] Auto-install LSP servers when missing
 

@@ -1409,6 +1409,7 @@ dependencies = [
  "anyhow",
  "clap",
  "kodo-auth",
+ "kodo-config",
  "kodo-core",
  "kodo-fmt",
  "kodo-llm",
@@ -1470,6 +1471,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "kodo-config",
  "kodo-fmt",
  "kodo-llm",
  "kodo-lsp",
@@ -1492,6 +1494,7 @@ name = "kodo-fmt"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "kodo-config",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

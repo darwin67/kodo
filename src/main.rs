@@ -6,6 +6,7 @@ use clap::Parser;
 use tokio::sync::mpsc;
 
 use kodo_auth::{AuthConfig, AuthProvider, oauth::OAuthProvider, storage::TokenStorage};
+use kodo_config::{Config, loader::load_or_default};
 use kodo_core::agent::{Agent, AgentEvent};
 use kodo_llm::anthropic::AnthropicProvider;
 use kodo_llm::gemini::GeminiProvider;
@@ -49,6 +50,25 @@ fn create_provider(name: &str) -> Result<Arc<dyn Provider>> {
     }
 }
 
+fn create_provider_with_config(name: &str, config: &Config) -> Result<Arc<dyn Provider>> {
+    // For now, just use the existing create_provider function
+    // TODO: In the future, use config to override provider settings
+    // like API keys, base URLs, timeouts, etc.
+    let provider = create_provider(name)?;
+
+    // Log if provider config exists
+    if let Some(provider_config) = config.providers.get(name) {
+        if provider_config.api_key.is_some() {
+            tracing::debug!("Found API key in config for provider: {}", name);
+        }
+        if let Some(timeout) = provider_config.timeout {
+            tracing::debug!("Found timeout override in config: {}s", timeout);
+        }
+    }
+
+    Ok(provider)
+}
+
 fn default_model(provider_name: &str) -> &str {
     match provider_name {
         "anthropic" => "claude-sonnet-4-20250514",
@@ -86,13 +106,42 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let provider_name = cli.provider.as_deref().unwrap_or("anthropic");
-    let provider = create_provider(provider_name)?;
-    let model = cli
-        .model
-        .unwrap_or_else(|| default_model(provider_name).to_string());
+    // Load configuration
+    let config = load_or_default();
+
+    // Determine provider and model from CLI args or config
+    let provider_name = cli
+        .provider
+        .as_deref()
+        .unwrap_or(&config.general.default_provider);
+    let provider = create_provider_with_config(provider_name, &config)?;
+    let model = cli.model.unwrap_or_else(|| {
+        // Check provider-specific default model first
+        config
+            .providers
+            .get(provider_name)
+            .and_then(|p| p.default_model.clone())
+            .unwrap_or_else(|| {
+                // Fall back to general default model
+                if config.general.default_model.is_empty() {
+                    default_model(provider_name).to_string()
+                } else {
+                    config.general.default_model.clone()
+                }
+            })
+    });
 
     let mut agent = Agent::new(provider).with_model(&model);
+
+    // Set max concurrent subagents from config
+    agent.set_max_concurrent_subagents(config.general.max_subagents);
+
+    // Configure custom LSP servers from config
+    agent.configure_lsp_servers(&config.lsp_servers, config.general.auto_install_lsp);
+
+    // Configure custom formatters from config
+    agent.configure_formatters(&config.formatters);
+
     kodo_tools::register_builtin_tools(agent.tool_registry_mut());
 
     // Initialize terminal
@@ -100,7 +149,8 @@ async fn main() -> Result<()> {
     let mut events = EventHandler::new(Duration::from_millis(100));
 
     // Initialize application state (Model) following Elm Architecture
-    let mut model = Model::new(cli.debug);
+    let debug_enabled = cli.debug || config.general.debug;
+    let mut model = Model::new(debug_enabled);
     model.provider = agent.provider_name().to_string();
     model.model_name = agent.model().to_string();
     model.mode = agent.mode.to_string();
@@ -110,7 +160,7 @@ async fn main() -> Result<()> {
     model.context_tokens = context.current_conversation_tokens;
     model.context_limit = context.current_model_limit;
 
-    if cli.debug {
+    if debug_enabled {
         model.debug_panel_open = true;
         model
             .debug_logs

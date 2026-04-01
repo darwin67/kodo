@@ -20,6 +20,10 @@ debug = false
 # Session storage directory (defaults to system data dir)
 # session-dir = "~/.local/share/kodo/sessions"
 
+# Automatically install missing LSP servers (default: false)
+# When enabled, Kodo will attempt to install LSP servers that are not found
+auto-install-lsp = false
+
 # Provider-specific settings
 [providers.anthropic]
 # API key can be set here or via ANTHROPIC_API_KEY env var

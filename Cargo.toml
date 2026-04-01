@@ -85,6 +85,7 @@ edition.workspace = true
 
 [dependencies]
 kodo-auth = { workspace = true }
+kodo-config = { workspace = true }
 kodo-core = { workspace = true }
 kodo-llm = { workspace = true }
 kodo-tools = { workspace = true }

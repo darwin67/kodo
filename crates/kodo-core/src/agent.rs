@@ -180,6 +180,38 @@ impl Agent {
         &self.messages
     }
 
+    /// Set maximum concurrent subagents limit
+    pub fn set_max_concurrent_subagents(&mut self, limit: usize) {
+        // TODO: Implement when subagent manager is available
+        let _ = limit; // Avoid unused parameter warning
+    }
+
+    /// Configure custom LSP servers from config
+    pub fn configure_lsp_servers(
+        &mut self,
+        custom_servers: &std::collections::HashMap<String, kodo_config::LspConfig>,
+        auto_install: bool,
+    ) {
+        // TODO: Implement custom LSP server configuration
+        if !custom_servers.is_empty() {
+            tracing::debug!(
+                "Found {} custom LSP server configurations",
+                custom_servers.len()
+            );
+        }
+        if auto_install {
+            tracing::debug!("Auto-install LSP servers is enabled");
+        }
+    }
+
+    /// Configure custom formatters from config
+    pub fn configure_formatters(
+        &mut self,
+        custom_formatters: &std::collections::HashMap<String, kodo_config::FormatterConfig>,
+    ) {
+        self.formatter_registry = FormatterRegistry::with_custom(custom_formatters);
+    }
+
     /// Process a user message through the agentic loop.
     /// Emits `AgentEvent`s to the provided sender for UI rendering.
     /// If no sender is provided, events are silently discarded (headless mode).

@@ -101,6 +101,41 @@ impl FormatterRegistry {
     pub fn is_empty(&self) -> bool {
         self.formatters.is_empty()
     }
+
+    /// Create a registry with built-in formatters and custom ones from config.
+    pub fn with_custom(
+        custom_formatters: &std::collections::HashMap<String, kodo_config::FormatterConfig>,
+    ) -> Self {
+        let mut registry = Self::with_builtins();
+
+        // Add custom formatters, overriding built-ins if they have the same extensions
+        for (name, config) in custom_formatters {
+            // Build command array: [command, ...args]
+            let mut command = vec![config.command.clone()];
+            command.extend(
+                config
+                    .args
+                    .iter()
+                    .map(|arg| arg.replace("{file}", "$FILE"))
+                    .collect::<Vec<_>>(),
+            );
+
+            let formatter = FormatterConfig {
+                name: name.clone(),
+                command,
+                extensions: config.extensions.clone(),
+            };
+
+            // Remove any existing formatters for these extensions
+            for ext in &formatter.extensions {
+                registry.formatters.remove(ext);
+            }
+
+            registry.register(formatter);
+        }
+
+        registry
+    }
 }
 
 impl Default for FormatterRegistry {

@@ -59,6 +59,10 @@ pub struct GeneralConfig {
     /// Session storage directory
     #[serde(default)]
     pub session_dir: Option<PathBuf>,
+
+    /// Automatically install missing LSP servers
+    #[serde(default)]
+    pub auto_install_lsp: bool,
 }
 
 impl Default for GeneralConfig {
@@ -70,6 +74,7 @@ impl Default for GeneralConfig {
             max_subagents: default_max_subagents(),
             debug: false,
             session_dir: None,
+            auto_install_lsp: false,
         }
     }
 }
