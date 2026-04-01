@@ -118,7 +118,10 @@ async fn main() -> Result<()> {
                     // Always send Done so the TUI knows processing finished
                     let _ = agent_event_tx.send(AgentEvent::Done);
                 }
-                AgentRequest::Quit => break,
+                AgentRequest::Quit => {
+                    agent.shutdown_lsp().await;
+                    break;
+                }
             }
         }
     });
@@ -202,6 +205,7 @@ fn map_agent_event(event: AgentEvent) -> Message {
         AgentEvent::ToolDenied { name, reason } => Message::AgentToolDenied { name, reason },
         AgentEvent::ToolCancelled { name } => Message::AgentToolCancelled { name },
         AgentEvent::Formatted { message } => Message::AgentFormatted { message },
+        AgentEvent::Diagnostics { summary, count } => Message::AgentDiagnostics { summary, count },
         AgentEvent::Error(error) => Message::AgentError(error),
         AgentEvent::Done => Message::AgentDone,
     }

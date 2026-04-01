@@ -13,6 +13,8 @@ use kodo_llm::provider::Provider;
 use kodo_llm::types::{
     CompletionRequest, ContentBlock, Message, Role, StopReason, StreamEvent, ToolDefinition,
 };
+use kodo_lsp::diagnostics;
+use kodo_lsp::manager::LspManager;
 use kodo_tools::registry::ToolRegistry;
 use kodo_tools::tool::ToolContext;
 
@@ -60,6 +62,8 @@ pub enum AgentEvent {
     ToolDone { name: String, success: bool },
     /// Formatter ran on a file.
     Formatted { message: String },
+    /// LSP diagnostics collected after a file change.
+    Diagnostics { summary: String, count: usize },
     /// An error occurred.
     Error(String),
     /// Message processing is complete.
@@ -78,6 +82,7 @@ pub struct Agent {
     provider: Arc<dyn Provider>,
     tool_registry: ToolRegistry,
     formatter_registry: FormatterRegistry,
+    lsp_manager: LspManager,
     checkpoints: CheckpointManager,
     messages: Vec<Message>,
     context: ContextTracker,
@@ -92,6 +97,7 @@ impl Agent {
             provider,
             tool_registry: ToolRegistry::new(),
             formatter_registry: FormatterRegistry::with_builtins(),
+            lsp_manager: LspManager::new(std::env::current_dir().unwrap_or_default()),
             checkpoints: CheckpointManager::new(),
             messages: Vec::new(),
             context: ContextTracker::new(),
@@ -197,12 +203,30 @@ impl Agent {
 
     fn build_request(&self) -> CompletionRequest {
         let mode = self.mode;
-        let tools: Vec<ToolDefinition> = self
+        let mut tools: Vec<ToolDefinition> = self
             .tool_registry
             .tool_definitions_filtered(|level| mode.allows(level))
             .into_iter()
             .map(|v| serde_json::from_value(v).unwrap())
             .collect();
+
+        // Add the get_diagnostics tool (handled by the agent, not the registry).
+        tools.push(ToolDefinition {
+            name: "get_diagnostics".into(),
+            description: "Get LSP diagnostics (errors, warnings) for a file. Use this to \
+                check for type errors or other issues after editing code."
+                .into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file to get diagnostics for"
+                    }
+                },
+                "required": ["path"]
+            }),
+        });
 
         CompletionRequest {
             model: self.model.clone(),
@@ -306,6 +330,13 @@ impl Agent {
             if let ContentBlock::ToolUse { id, name, input } = block {
                 debug!(tool = %name, id = %id, "executing tool");
 
+                // Handle get_diagnostics tool (agent-managed, not in registry).
+                if name == "get_diagnostics" {
+                    let result = self.handle_get_diagnostics(input, tx).await;
+                    results.push(ContentBlock::tool_result(id, &result, false));
+                    continue;
+                }
+
                 // Enforce mode restrictions.
                 if let Some(tool) = self.tool_registry.get(name)
                     && !self.mode.allows(tool.permission_level())
@@ -361,9 +392,10 @@ impl Agent {
                     Ok(output) => {
                         debug!(tool = %name, success = output.success, "tool completed");
 
-                        // Run formatter after file write/edit tools.
+                        // Run formatter and collect LSP diagnostics after file write/edit.
                         if output.success && FILE_WRITE_TOOLS.contains(&name.as_str()) {
                             self.maybe_format_file(name, input, tx).await;
+                            self.maybe_collect_diagnostics(input, tx).await;
                         }
 
                         emit(
@@ -422,6 +454,152 @@ impl Agent {
                 );
             }
         }
+    }
+
+    /// Handle the get_diagnostics tool call.
+    async fn handle_get_diagnostics(
+        &mut self,
+        input: &serde_json::Value,
+        tx: Option<&AgentEventTx>,
+    ) -> String {
+        let path_str = match input.get("path").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => return "Error: missing 'path' parameter".to_string(),
+        };
+
+        let path = PathBuf::from(path_str);
+        emit(
+            tx,
+            AgentEvent::ToolStart {
+                name: "get_diagnostics".into(),
+            },
+        );
+
+        if !self.lsp_manager.has_server_for(&path) {
+            emit(
+                tx,
+                AgentEvent::ToolDone {
+                    name: "get_diagnostics".into(),
+                    success: true,
+                },
+            );
+            return format!("No LSP server configured for {}", path.display());
+        }
+
+        let content = match tokio::fs::read_to_string(&path).await {
+            Ok(c) => c,
+            Err(e) => {
+                emit(
+                    tx,
+                    AgentEvent::ToolDone {
+                        name: "get_diagnostics".into(),
+                        success: false,
+                    },
+                );
+                return format!("Error reading file: {e}");
+            }
+        };
+
+        match self
+            .lsp_manager
+            .diagnostics_after_change(&path, &content)
+            .await
+        {
+            Ok(diags) => {
+                let summary = diagnostics::format_diagnostics(&diags);
+                emit(
+                    tx,
+                    AgentEvent::Diagnostics {
+                        summary: summary.clone(),
+                        count: diags.len(),
+                    },
+                );
+                emit(
+                    tx,
+                    AgentEvent::ToolDone {
+                        name: "get_diagnostics".into(),
+                        success: true,
+                    },
+                );
+                summary
+            }
+            Err(e) => {
+                emit(
+                    tx,
+                    AgentEvent::ToolDone {
+                        name: "get_diagnostics".into(),
+                        success: false,
+                    },
+                );
+                format!("Error collecting diagnostics: {e}")
+            }
+        }
+    }
+
+    /// Collect LSP diagnostics after a file was written/edited.
+    /// Notifies the LSP of the change and injects any diagnostics into context.
+    async fn maybe_collect_diagnostics(
+        &mut self,
+        input: &serde_json::Value,
+        tx: Option<&AgentEventTx>,
+    ) {
+        let path_str = match input.get("path").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => return,
+        };
+
+        let path = PathBuf::from(path_str);
+
+        if !self.lsp_manager.has_server_for(&path) {
+            return;
+        }
+
+        // Read the file content after formatting.
+        let content = match tokio::fs::read_to_string(&path).await {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        match self
+            .lsp_manager
+            .diagnostics_after_change(&path, &content)
+            .await
+        {
+            Ok(diags) if !diags.is_empty() => {
+                let summary = diagnostics::format_diagnostics(&diags);
+                let count = diags.len();
+                debug!(file = %path.display(), count, "LSP diagnostics collected");
+                emit(
+                    tx,
+                    AgentEvent::Diagnostics {
+                        summary: summary.clone(),
+                        count,
+                    },
+                );
+                // Inject diagnostics into the conversation so the LLM can see them.
+                self.messages.push(Message::user(format!(
+                    "[LSP diagnostics after editing {}]\n{}",
+                    path.display(),
+                    summary
+                )));
+            }
+            Ok(_) => {
+                debug!(file = %path.display(), "no LSP diagnostics");
+            }
+            Err(e) => {
+                debug!(error = %e, "failed to collect LSP diagnostics");
+            }
+        }
+    }
+
+    /// Access the LSP manager.
+    pub fn lsp_manager(&self) -> &LspManager {
+        &self.lsp_manager
+    }
+
+    /// Shut down all LSP servers (call on session end).
+    pub async fn shutdown_lsp(&mut self) {
+        self.lsp_manager.shutdown_all().await;
     }
 }
 

@@ -375,12 +375,12 @@ Upgrade from readline to a proper terminal UI.
 
 Give the agent awareness of type errors and diagnostics.
 
-- [ ] ~kodo-lsp~ crate: LSP client over stdio (JSON-RPC)
-- [ ] ~LspManager~: detect file extensions, auto-start appropriate server
-- [ ] Built-in configs: rust-analyzer, gopls, typescript, pyright
-- [ ] Hook into agentic loop: after file edits -> notify LSP -> collect diagnostics -> inject into context
-- [ ] ~get_diagnostics~ tool: explicit on-demand diagnostics for the LLM
-- [ ] Graceful server lifecycle (start on first relevant file, shutdown on session end)
+- [X] ~kodo-lsp~ crate: LSP client over stdio (JSON-RPC)
+- [X] ~LspManager~: detect file extensions, auto-start appropriate server
+- [X] Built-in configs: rust-analyzer, gopls, typescript, pyright
+- [X] Hook into agentic loop: after file edits -> notify LSP -> collect diagnostics -> inject into context
+- [X] ~get_diagnostics~ tool: explicit on-demand diagnostics for the LLM
+- [X] Graceful server lifecycle (start on first relevant file, shutdown on session end)
 
 ** Phase 8 — Polish & Future
 
