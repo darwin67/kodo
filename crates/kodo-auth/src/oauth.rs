@@ -3,15 +3,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::{
-    Router,
     extract::{Query, State},
     response::{Html, Redirect},
     routing::get,
+    Router,
 };
 use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 use tower_http::cors::CorsLayer;
 use url::Url;
 
@@ -61,7 +61,7 @@ impl OAuthProvider {
 
     /// Generate PKCE challenge
     fn generate_pkce() -> (String, String) {
-        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
         let mut verifier_bytes = [0u8; 32];
         rand::thread_rng().fill(&mut verifier_bytes);
@@ -76,7 +76,7 @@ impl OAuthProvider {
 
     /// Generate random state for CSRF protection
     fn generate_state() -> String {
-        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
         let mut state_bytes = [0u8; 16];
         rand::thread_rng().fill(&mut state_bytes);
