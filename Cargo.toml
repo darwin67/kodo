@@ -63,6 +63,9 @@ regex = "1"
 # Keychain
 keyring = { version = "3", features = ["apple-native", "linux-native"] }
 
+# LSP
+lsp-types = "0.97"
+
 # Syntax highlighting
 syntect = "5"
 
