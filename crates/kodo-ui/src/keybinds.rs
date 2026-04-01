@@ -300,10 +300,13 @@ mod tests {
     }
 
     #[test]
-    fn test_leader_sequence() {
+    fn test_direct_keybinds() {
         let registry = KeyBindRegistry::new();
-        let leader_action = registry.get_leader_action(KeyCode::Char('q'));
-        assert!(matches!(leader_action, Some(KeyAction::Quit)));
+        let action = registry.get_action(&crossterm::event::KeyEvent::new(
+            KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::CONTROL,
+        ));
+        assert!(matches!(action, Some(KeyAction::Quit)));
     }
 
     #[test]
