@@ -92,22 +92,15 @@ impl Transport {
         let mut notifications = Vec::new();
 
         // Try reading with a short timeout — don't block if nothing is pending.
-        loop {
-            match tokio::time::timeout(std::time::Duration::from_millis(100), self.read_message())
-                .await
+        while let Ok(Ok(msg)) =
+            tokio::time::timeout(std::time::Duration::from_millis(100), self.read_message()).await
+        {
+            if msg.get("method").and_then(|v| v.as_str()) == Some("textDocument/publishDiagnostics")
+                && let Some(params) = msg.get("params")
             {
-                Ok(Ok(msg)) => {
-                    if msg.get("method").and_then(|v| v.as_str())
-                        == Some("textDocument/publishDiagnostics")
-                    {
-                        if let Some(params) = msg.get("params") {
-                            notifications.push(params.clone());
-                        }
-                    }
-                    // Continue draining.
-                }
-                _ => break, // Timeout or error — no more pending.
+                notifications.push(params.clone());
             }
+            // Continue draining.
         }
 
         notifications
