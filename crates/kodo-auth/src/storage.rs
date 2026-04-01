@@ -133,7 +133,7 @@ impl TokenStorage {
 
     fn delete_linux(&self, key: &str) -> Result<()> {
         let entry = keyring::Entry::new(&self.service_name, key)?;
-        match entry.delete_password() {
+        match entry.delete_credential() {
             Ok(_) => Ok(()),
             Err(keyring::Error::NoEntry) => Ok(()), // Already deleted
             Err(e) => Err(e).context("Failed to delete token from Linux keyring"),
