@@ -77,6 +77,8 @@ pub enum Message {
     AgentToolCancelled { name: String },
     /// Agent formatted a file (post-edit)
     AgentFormatted { message: String },
+    /// Agent collected LSP diagnostics after a file edit
+    AgentDiagnostics { summary: String, count: usize },
     /// Agent encountered an error
     AgentError(String),
     /// Agent finished processing (no more streaming or tools)

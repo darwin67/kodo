@@ -245,7 +245,24 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
 
         Message::AgentFormatted { message } => {
             if model.debug_mode {
-                model.debug_logs.push(format!("🎨 Formatted: {}", message));
+                model.debug_logs.push(format!("Formatted: {}", message));
+            }
+            vec![Command::None]
+        }
+
+        Message::AgentDiagnostics { summary, count } => {
+            if model.debug_mode {
+                model
+                    .debug_logs
+                    .push(format!("LSP: {} diagnostic(s)", count));
+            }
+            // Show diagnostics in chat so user sees errors/warnings.
+            if count > 0 {
+                model.messages.push(ChatMessage {
+                    role: ChatRole::System,
+                    content: summary,
+                });
+                model.scroll_offset = 0;
             }
             vec![Command::None]
         }

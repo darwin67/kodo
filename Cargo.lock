@@ -1230,6 +1230,7 @@ dependencies = [
  "futures",
  "kodo-fmt",
  "kodo-llm",
+ "kodo-lsp",
  "kodo-tools",
  "pin-project-lite",
  "regex",

@@ -202,6 +202,7 @@ fn map_agent_event(event: AgentEvent) -> Message {
         AgentEvent::ToolDenied { name, reason } => Message::AgentToolDenied { name, reason },
         AgentEvent::ToolCancelled { name } => Message::AgentToolCancelled { name },
         AgentEvent::Formatted { message } => Message::AgentFormatted { message },
+        AgentEvent::Diagnostics { summary, count } => Message::AgentDiagnostics { summary, count },
         AgentEvent::Error(error) => Message::AgentError(error),
         AgentEvent::Done => Message::AgentDone,
     }
