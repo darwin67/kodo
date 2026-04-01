@@ -274,8 +274,20 @@ mod tests {
 
     #[test]
     fn path_to_uri_absolute() {
-        let uri = path_to_uri(Path::new("/tmp/test.rs"));
-        assert_eq!(uri, "file:///tmp/test.rs");
+        let path = if cfg!(windows) {
+            Path::new("C:\\tmp\\test.rs")
+        } else {
+            Path::new("/tmp/test.rs")
+        };
+        let uri = path_to_uri(path);
+
+        let expected = if cfg!(windows) {
+            "file://C:/tmp/test.rs"
+        } else {
+            "file:///tmp/test.rs"
+        };
+
+        assert_eq!(uri, expected);
     }
 
     #[test]
