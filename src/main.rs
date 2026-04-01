@@ -5,6 +5,7 @@ use anyhow::{Result, bail};
 use clap::Parser;
 use tokio::sync::mpsc;
 
+use kodo_auth::{AuthConfig, AuthProvider, oauth::OAuthProvider, storage::TokenStorage};
 use kodo_core::agent::{Agent, AgentEvent};
 use kodo_llm::anthropic::AnthropicProvider;
 use kodo_llm::gemini::GeminiProvider;
@@ -32,6 +33,10 @@ struct Cli {
     /// Enable debug mode (shows debug side panel with Ctrl+\)
     #[arg(long)]
     debug: bool,
+
+    /// Authenticate with a provider (anthropic, openai)
+    #[arg(long)]
+    auth: Option<String>,
 }
 
 fn create_provider(name: &str) -> Result<Arc<dyn Provider>> {
@@ -74,6 +79,12 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // Handle authentication command
+    if let Some(auth_provider) = cli.auth {
+        handle_auth(&auth_provider).await?;
+        return Ok(());
+    }
 
     let provider_name = cli.provider.as_deref().unwrap_or("anthropic");
     let provider = create_provider(provider_name)?;
@@ -223,4 +234,36 @@ fn map_agent_event(event: AgentEvent) -> Message {
         },
         AgentEvent::Done => Message::AgentDone,
     }
+}
+
+/// Handle OAuth authentication flow
+async fn handle_auth(provider_name: &str) -> Result<()> {
+    println!("Starting authentication for {}...", provider_name);
+
+    let config = match provider_name {
+        "anthropic" => AuthConfig::anthropic(),
+        "openai" => AuthConfig::openai(),
+        _ => bail!(
+            "Unsupported auth provider: {}. Available: anthropic, openai",
+            provider_name
+        ),
+    };
+
+    let oauth = OAuthProvider::new(config);
+    let token = oauth.login().await?;
+
+    // Store token securely
+    let storage = TokenStorage::new("kodo");
+    storage.store(&token).await?;
+
+    println!("Authentication successful! Token has been securely stored.");
+    println!();
+    println!("To use the authenticated token, set the environment variable:");
+    match provider_name {
+        "anthropic" => println!("export ANTHROPIC_API_KEY={}", token.access_token),
+        "openai" => println!("export OPENAI_API_KEY={}", token.access_token),
+        _ => {}
+    }
+
+    Ok(())
 }
