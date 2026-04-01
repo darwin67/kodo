@@ -118,7 +118,10 @@ async fn main() -> Result<()> {
                     // Always send Done so the TUI knows processing finished
                     let _ = agent_event_tx.send(AgentEvent::Done);
                 }
-                AgentRequest::Quit => break,
+                AgentRequest::Quit => {
+                    agent.shutdown_lsp().await;
+                    break;
+                }
             }
         }
     });
