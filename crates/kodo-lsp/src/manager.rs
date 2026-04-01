@@ -252,7 +252,9 @@ fn path_to_uri(path: &Path) -> String {
     } else {
         std::env::current_dir().unwrap_or_default().join(path)
     };
-    format!("file://{}", abs.display())
+    // URIs always use forward slashes, even on Windows
+    let uri_path = abs.to_string_lossy().replace('\\', "/");
+    format!("file://{}", uri_path)
 }
 
 fn detect_language(path: &Path) -> &str {
