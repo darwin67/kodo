@@ -392,8 +392,8 @@ Refinements and advanced features.
 - [X] Subagent support (spawn isolated agent tasks)
 - [ ] MCP server integration
 - [X] Config file support (YAML + TOML)
-- [ ] Custom LSP servers and formatters via config
-- [ ] Auto-install LSP servers when missing
+- [X] Custom LSP servers and formatters via config
+- [X] Auto-install LSP servers when missing
 
 * References
 
