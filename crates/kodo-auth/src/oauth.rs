@@ -66,7 +66,7 @@ impl OAuthProvider {
         let mut rng = rand::thread_rng();
         let mut verifier_bytes = [0u8; 32];
         rng.fill_bytes(&mut verifier_bytes);
-        let verifier = URL_SAFE_NO_PAD.encode(&verifier_bytes);
+        let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
 
         let mut hasher = Sha256::new();
         hasher.update(&verifier);
@@ -82,7 +82,7 @@ impl OAuthProvider {
         let mut rng = rand::thread_rng();
         let mut state_bytes = [0u8; 16];
         rng.fill_bytes(&mut state_bytes);
-        URL_SAFE_NO_PAD.encode(&state_bytes)
+        URL_SAFE_NO_PAD.encode(state_bytes)
     }
 }
 
@@ -135,7 +135,7 @@ impl AuthProvider for OAuthProvider {
 
         // Open browser
         println!("Opening browser for authentication...");
-        webbrowser::open(&auth_url.to_string())?;
+        webbrowser::open(auth_url.as_ref())?;
 
         // Wait for callback with timeout
         let code = tokio::time::timeout(Duration::from_secs(300), rx)

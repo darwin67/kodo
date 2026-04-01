@@ -296,7 +296,7 @@ mod tests {
         let tokens = ContextTracker::estimate_tokens(&messages, None);
         // "Hello, world!" (13 chars) + "Hi there!" (9 chars) + overhead (~80 chars) = ~102 chars
         // ~102 chars / 4 = ~25 tokens
-        assert!(tokens >= 20 && tokens <= 30);
+        assert!((20..=30).contains(&tokens));
     }
 
     #[test]
@@ -307,7 +307,7 @@ mod tests {
         let tokens = ContextTracker::estimate_tokens(&messages, Some(system_prompt));
         // System prompt (29 chars) + "Hi" (2 chars) + overhead (~40 chars) = ~71 chars
         // ~71 chars / 4 = ~18 tokens
-        assert!(tokens >= 15 && tokens <= 25);
+        assert!((15..=25).contains(&tokens));
     }
 
     #[test]

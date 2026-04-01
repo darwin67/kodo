@@ -35,6 +35,7 @@ struct ApiRequest {
 #[derive(Serialize, Debug, PartialEq)]
 #[serde(untagged)]
 enum ApiSystemPrompt {
+    #[allow(dead_code)]
     Simple(String),
     WithCache(ApiSystemPromptWithCache),
 }
@@ -195,6 +196,7 @@ fn to_api_messages(messages: &[Message]) -> Vec<ApiMessage> {
         .collect()
 }
 
+#[allow(dead_code)]
 fn to_api_content_block(block: &ContentBlock) -> ApiContentBlock {
     to_api_content_block_with_cache(block, false)
 }

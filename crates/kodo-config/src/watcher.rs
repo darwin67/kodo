@@ -16,7 +16,7 @@ use crate::loader::load_config;
 #[derive(Debug, Clone)]
 pub enum ConfigChange {
     /// Config file was modified
-    Modified(Config),
+    Modified(Box<Config>),
     /// Config file was removed
     Removed,
     /// Error loading config
@@ -88,7 +88,9 @@ impl ConfigWatcher {
         match load_config(&self.config_path) {
             Ok(new_config) => {
                 *self.current_config.write().await = new_config.clone();
-                let _ = self.tx.send(ConfigChange::Modified(new_config.clone()));
+                let _ = self
+                    .tx
+                    .send(ConfigChange::Modified(Box::new(new_config.clone())));
                 Ok(new_config)
             }
             Err(e) => {
@@ -131,7 +133,7 @@ fn handle_event(
                     }
 
                     info!("Config reloaded from: {}", config_path.display());
-                    let _ = tx.send(ConfigChange::Modified(new_config));
+                    let _ = tx.send(ConfigChange::Modified(Box::new(new_config)));
                 }
                 Err(e) => {
                     error!("Failed to reload config: {}", e);
