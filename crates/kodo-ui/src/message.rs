@@ -2,7 +2,7 @@
 /// Following the Elm Architecture pattern, Messages are the ONLY way
 /// to modify the application state. They describe what happened, not
 /// how to handle it (that's the job of update()).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     // -- Input events --
     /// User typed a character in the input field
@@ -81,6 +81,12 @@ pub enum Message {
     AgentDiagnostics { summary: String, count: usize },
     /// Agent encountered an error
     AgentError(String),
+    /// Context window update
+    ContextUpdate {
+        tokens: u32,
+        limit: u32,
+        percent: f32,
+    },
     /// Agent finished processing (no more streaming or tools)
     AgentDone,
 

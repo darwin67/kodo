@@ -46,7 +46,7 @@ impl From<KeyEvent> for KeyBind {
 }
 
 /// Action that can be triggered by a keybind
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum KeyAction {
     /// Send a specific message
     Message(Message),

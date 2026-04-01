@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::Modifier,
+    style::{Color, Modifier},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
@@ -66,10 +66,22 @@ fn render_status_bar(frame: &mut Frame, model: &Model, area: Rect) {
     let mode_indicator = format!(" {} ", model.mode.to_uppercase());
     let provider_model = format!(" {} / {} ", model.provider, model.model_name);
     let tokens = format!(" {}i/{}o ", model.input_tokens, model.output_tokens);
+
+    // Context window usage
+    let context_info = if model.context_limit > 0 {
+        let percent = (model.context_tokens as f32 / model.context_limit as f32 * 100.0).min(100.0);
+        format!(
+            " {}/{} ({:.0}%) ",
+            model.context_tokens, model.context_limit, percent
+        )
+    } else {
+        String::new()
+    };
+
     let palette_hint = " Ctrl+K ";
 
-    let status =
-        Line::from(vec![
+    let mut spans =
+        vec![
             Span::styled(
                 mode_indicator,
                 model.theme.status_style().add_modifier(Modifier::BOLD).fg(
@@ -84,16 +96,46 @@ fn render_status_bar(frame: &mut Frame, model: &Model, area: Rect) {
             Span::styled(provider_model, model.theme.status_style()),
             Span::styled(" | ", model.theme.status_style()),
             Span::styled(tokens, model.theme.status_style()),
-            // Fill remaining space
-            Span::styled(
-                " ".repeat(area.width.saturating_sub(50) as usize),
-                model.theme.status_style(),
-            ),
-            Span::styled(
-                palette_hint,
-                model.theme.status_style().fg(model.theme.muted),
-            ),
-        ]);
+        ];
+
+    // Add context info if available
+    if !context_info.is_empty() {
+        spans.push(Span::styled(" | ", model.theme.status_style()));
+
+        // Color code based on usage
+        let percent = (model.context_tokens as f32 / model.context_limit as f32 * 100.0).min(100.0);
+        let context_color = if percent >= 80.0 {
+            model.theme.error
+        } else if percent >= 60.0 {
+            Color::Yellow // warning color
+        } else {
+            model.theme.fg
+        };
+
+        spans.push(Span::styled(
+            context_info,
+            model.theme.status_style().fg(context_color),
+        ));
+    }
+
+    // Calculate used width
+    let used_width: usize = spans.iter().map(|s| s.content.len()).sum();
+    let palette_width = palette_hint.len();
+    let remaining = area
+        .width
+        .saturating_sub((used_width + palette_width) as u16) as usize;
+
+    // Fill remaining space
+    spans.push(Span::styled(
+        " ".repeat(remaining),
+        model.theme.status_style(),
+    ));
+    spans.push(Span::styled(
+        palette_hint,
+        model.theme.status_style().fg(model.theme.muted),
+    ));
+
+    let status = Line::from(spans);
 
     let bar = Paragraph::new(status).style(model.theme.status_style());
     frame.render_widget(bar, area);

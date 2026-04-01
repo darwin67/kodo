@@ -281,6 +281,16 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
             vec![Command::None]
         }
 
+        Message::ContextUpdate {
+            tokens,
+            limit,
+            percent: _,
+        } => {
+            model.context_tokens = tokens;
+            model.context_limit = limit;
+            vec![Command::None]
+        }
+
         Message::AgentDone => {
             model.is_streaming = false;
             vec![Command::None]

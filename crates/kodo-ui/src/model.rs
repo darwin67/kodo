@@ -54,6 +54,10 @@ pub struct Model {
     pub input_tokens: u64,
     /// Total output tokens generated this session
     pub output_tokens: u64,
+    /// Current conversation token count
+    pub context_tokens: u32,
+    /// Model context window limit
+    pub context_limit: u32,
 
     // -- Command palette state --
     /// Whether the command palette is currently open
@@ -111,6 +115,8 @@ impl Model {
             model_name: "unknown".to_string(),
             input_tokens: 0,
             output_tokens: 0,
+            context_tokens: 0,
+            context_limit: 0,
 
             // Palette state
             palette_open: false,

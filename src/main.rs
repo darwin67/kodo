@@ -94,6 +94,11 @@ async fn main() -> Result<()> {
     model.model_name = agent.model().to_string();
     model.mode = agent.mode.to_string();
 
+    // Initialize context information
+    let context = agent.context();
+    model.context_tokens = context.current_conversation_tokens;
+    model.context_limit = context.current_model_limit;
+
     if cli.debug {
         model.debug_panel_open = true;
         model
@@ -207,6 +212,15 @@ fn map_agent_event(event: AgentEvent) -> Message {
         AgentEvent::Formatted { message } => Message::AgentFormatted { message },
         AgentEvent::Diagnostics { summary, count } => Message::AgentDiagnostics { summary, count },
         AgentEvent::Error(error) => Message::AgentError(error),
+        AgentEvent::ContextUpdate {
+            tokens,
+            limit,
+            percent,
+        } => Message::ContextUpdate {
+            tokens,
+            limit,
+            percent,
+        },
         AgentEvent::Done => Message::AgentDone,
     }
 }
