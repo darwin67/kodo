@@ -203,12 +203,30 @@ impl Agent {
 
     fn build_request(&self) -> CompletionRequest {
         let mode = self.mode;
-        let tools: Vec<ToolDefinition> = self
+        let mut tools: Vec<ToolDefinition> = self
             .tool_registry
             .tool_definitions_filtered(|level| mode.allows(level))
             .into_iter()
             .map(|v| serde_json::from_value(v).unwrap())
             .collect();
+
+        // Add the get_diagnostics tool (handled by the agent, not the registry).
+        tools.push(ToolDefinition {
+            name: "get_diagnostics".into(),
+            description: "Get LSP diagnostics (errors, warnings) for a file. Use this to \
+                check for type errors or other issues after editing code."
+                .into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the file to get diagnostics for"
+                    }
+                },
+                "required": ["path"]
+            }),
+        });
 
         CompletionRequest {
             model: self.model.clone(),
@@ -311,6 +329,13 @@ impl Agent {
         for block in tool_uses {
             if let ContentBlock::ToolUse { id, name, input } = block {
                 debug!(tool = %name, id = %id, "executing tool");
+
+                // Handle get_diagnostics tool (agent-managed, not in registry).
+                if name == "get_diagnostics" {
+                    let result = self.handle_get_diagnostics(input, tx).await;
+                    results.push(ContentBlock::tool_result(id, &result, false));
+                    continue;
+                }
 
                 // Enforce mode restrictions.
                 if let Some(tool) = self.tool_registry.get(name)
@@ -427,6 +452,86 @@ impl Agent {
                     "formatter failed after {}",
                     tool_name
                 );
+            }
+        }
+    }
+
+    /// Handle the get_diagnostics tool call.
+    async fn handle_get_diagnostics(
+        &mut self,
+        input: &serde_json::Value,
+        tx: Option<&AgentEventTx>,
+    ) -> String {
+        let path_str = match input.get("path").and_then(|v| v.as_str()) {
+            Some(p) => p,
+            None => return "Error: missing 'path' parameter".to_string(),
+        };
+
+        let path = PathBuf::from(path_str);
+        emit(
+            tx,
+            AgentEvent::ToolStart {
+                name: "get_diagnostics".into(),
+            },
+        );
+
+        if !self.lsp_manager.has_server_for(&path) {
+            emit(
+                tx,
+                AgentEvent::ToolDone {
+                    name: "get_diagnostics".into(),
+                    success: true,
+                },
+            );
+            return format!("No LSP server configured for {}", path.display());
+        }
+
+        let content = match tokio::fs::read_to_string(&path).await {
+            Ok(c) => c,
+            Err(e) => {
+                emit(
+                    tx,
+                    AgentEvent::ToolDone {
+                        name: "get_diagnostics".into(),
+                        success: false,
+                    },
+                );
+                return format!("Error reading file: {e}");
+            }
+        };
+
+        match self
+            .lsp_manager
+            .diagnostics_after_change(&path, &content)
+            .await
+        {
+            Ok(diags) => {
+                let summary = diagnostics::format_diagnostics(&diags);
+                emit(
+                    tx,
+                    AgentEvent::Diagnostics {
+                        summary: summary.clone(),
+                        count: diags.len(),
+                    },
+                );
+                emit(
+                    tx,
+                    AgentEvent::ToolDone {
+                        name: "get_diagnostics".into(),
+                        success: true,
+                    },
+                );
+                summary
+            }
+            Err(e) => {
+                emit(
+                    tx,
+                    AgentEvent::ToolDone {
+                        name: "get_diagnostics".into(),
+                        success: false,
+                    },
+                );
+                format!("Error collecting diagnostics: {e}")
             }
         }
     }
