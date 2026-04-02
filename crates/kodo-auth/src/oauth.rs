@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use axum::{
     Router,
     extract::{Query, State},
-    response::{Html, Redirect},
+    response::Html,
     routing::get,
 };
 use rand::RngCore;
@@ -338,8 +338,6 @@ impl OAuthProvider {
         let app = Router::new()
             .route("/callback", get(handle_callback))
             .route("/auth/callback", get(handle_callback))
-            .route("/success", get(handle_success))
-            .route("/error", get(handle_error))
             .layer(CorsLayer::permissive())
             .with_state(callback_state);
 
@@ -370,6 +368,8 @@ impl OAuthProvider {
             .context("OAuth callback timeout")?
             .context("OAuth callback channel closed")??;
 
+        // Give the server a moment to flush the success HTML to the browser
+        tokio::time::sleep(Duration::from_millis(500)).await;
         server_handle.abort();
 
         // Exchange code for token
@@ -435,68 +435,61 @@ impl AuthProvider for OAuthProvider {
 }
 
 // OAuth callback handlers (for auto-redirect flow)
+// Returns HTML directly instead of redirecting, because the server
+// is aborted immediately after receiving the code.
 async fn handle_callback(
     Query(params): Query<AuthCallback>,
     State(state): State<Arc<Mutex<CallbackState>>>,
-) -> Result<Redirect, Redirect> {
+) -> Html<&'static str> {
     let mut state_lock = state.lock().await;
 
     if params.state.as_ref() != Some(&state_lock.expected_state) {
         if let Some(sender) = state_lock.sender.take() {
             let _ = sender.send(Err(anyhow::anyhow!("Invalid state parameter")));
         }
-        return Err(Redirect::to("/error"));
+        return Html(ERROR_HTML);
     }
 
     if let Some(sender) = state_lock.sender.take() {
         let _ = sender.send(Ok(params.code));
     }
 
-    Ok(Redirect::to("/success"))
+    Html(SUCCESS_HTML)
 }
 
-async fn handle_success() -> Html<&'static str> {
-    Html(
-        r#"
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Authentication Successful</title>
-            <style>
-                body { font-family: system-ui, sans-serif; text-align: center; padding: 50px; }
-                .success { color: #10b981; font-size: 48px; }
-            </style>
-        </head>
-        <body>
-            <div class="success">&#10003;</div>
-            <h1>Authentication Successful!</h1>
-            <p>You can close this window and return to Kodo.</p>
-            <script>setTimeout(() => window.close(), 3000);</script>
-        </body>
-        </html>
-    "#,
-    )
-}
+const SUCCESS_HTML: &str = r#"
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Authentication Successful</title>
+    <style>
+        body { font-family: system-ui, sans-serif; text-align: center; padding: 50px; }
+        .success { color: #10b981; font-size: 48px; }
+    </style>
+</head>
+<body>
+    <div class="success">&#10003;</div>
+    <h1>Authentication Successful!</h1>
+    <p>You can close this window and return to kodo.</p>
+    <script>setTimeout(() => window.close(), 2000);</script>
+</body>
+</html>
+"#;
 
-async fn handle_error() -> Html<&'static str> {
-    Html(
-        r#"
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Authentication Failed</title>
-            <style>
-                body { font-family: system-ui, sans-serif; text-align: center; padding: 50px; }
-                .error { color: #ef4444; font-size: 48px; }
-            </style>
-        </head>
-        <body>
-            <div class="error">&#10007;</div>
-            <h1>Authentication Failed</h1>
-            <p>Please try again or check your credentials.</p>
-            <script>setTimeout(() => window.close(), 3000);</script>
-        </body>
-        </html>
-    "#,
-    )
-}
+const ERROR_HTML: &str = r#"
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Authentication Failed</title>
+    <style>
+        body { font-family: system-ui, sans-serif; text-align: center; padding: 50px; }
+        .error { color: #ef4444; font-size: 48px; }
+    </style>
+</head>
+<body>
+    <div class="error">&#10007;</div>
+    <h1>Authentication Failed</h1>
+    <p>Please try again or check your credentials.</p>
+</body>
+</html>
+"#;

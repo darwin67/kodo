@@ -1,4 +1,4 @@
-.PHONY: all fmt fmt-check lint test check build release clean
+.PHONY: all fmt fmt-check lint test check build release clean reset
 
 all: fmt lint test
 
@@ -32,3 +32,13 @@ release:
 ## Remove build artifacts
 clean:
 	cargo clean
+
+## Reset all stored auth and session data (dev convenience)
+reset:
+	@echo "Removing session state..."
+	@rm -f ~/.config/kodo/last_session.json
+	@echo "Removing stored tokens from keychain..."
+	@security delete-generic-password -s kodo -a kodo-anthropic 2>/dev/null || true
+	@security delete-generic-password -s kodo -a kodo-openai 2>/dev/null || true
+	@security delete-generic-password -s kodo -a kodo-gemini 2>/dev/null || true
+	@echo "Done. All kodo auth data cleared."
