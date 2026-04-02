@@ -3,15 +3,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::{
+    Router,
     extract::{Query, State},
     response::Html,
     routing::get,
-    Router,
 };
 use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 use tower_http::cors::CorsLayer;
 use url::Url;
 
@@ -218,7 +218,7 @@ impl OAuthProvider {
     /// Generate PKCE challenge.
     /// Returns (verifier, challenge) where verifier is a 43-char base64url string.
     fn generate_pkce() -> (String, String) {
-        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
         let mut rng = rand::thread_rng();
         let mut verifier_bytes = [0u8; 32];
@@ -234,7 +234,7 @@ impl OAuthProvider {
 
     /// Generate random state for CSRF protection
     fn generate_state() -> String {
-        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
         let mut rng = rand::thread_rng();
         let mut state_bytes = [0u8; 32];
