@@ -790,6 +790,21 @@ fn models_for_provider(provider: &str) -> Vec<ModelOption> {
         ],
         "openai" => vec![
             ModelOption {
+                id: "gpt-5.4".to_string(),
+                display_name: "GPT-5.4".to_string(),
+                provider: "openai".to_string(),
+            },
+            ModelOption {
+                id: "gpt-5.4-mini".to_string(),
+                display_name: "GPT-5.4 Mini".to_string(),
+                provider: "openai".to_string(),
+            },
+            ModelOption {
+                id: "gpt-5.4-codex".to_string(),
+                display_name: "GPT-5.4 Codex".to_string(),
+                provider: "openai".to_string(),
+            },
+            ModelOption {
                 id: "o3".to_string(),
                 display_name: "o3".to_string(),
                 provider: "openai".to_string(),
@@ -810,18 +825,8 @@ fn models_for_provider(provider: &str) -> Vec<ModelOption> {
                 provider: "openai".to_string(),
             },
             ModelOption {
-                id: "gpt-4.1-nano".to_string(),
-                display_name: "GPT-4.1 Nano".to_string(),
-                provider: "openai".to_string(),
-            },
-            ModelOption {
                 id: "gpt-4o".to_string(),
                 display_name: "GPT-4o".to_string(),
-                provider: "openai".to_string(),
-            },
-            ModelOption {
-                id: "gpt-4o-mini".to_string(),
-                display_name: "GPT-4o Mini".to_string(),
                 provider: "openai".to_string(),
             },
             ModelOption {

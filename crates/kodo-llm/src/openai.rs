@@ -605,27 +605,32 @@ impl Provider for OpenAiProvider {
 impl OpenAiProvider {
     /// Filter for models that are useful for chat/coding tasks
     fn is_chat_model(id: &str) -> bool {
-        // Include gpt-4*, gpt-3.5*, o1*, o3*, o4* models
-        // Exclude embeddings, tts, whisper, dall-e, moderation, etc.
-        let dominated_by_chat = id.starts_with("gpt-4")
-            || id.starts_with("gpt-3.5")
+        let is_chat = id.starts_with("gpt-")
             || id.starts_with("o1")
             || id.starts_with("o3")
             || id.starts_with("o4")
-            || id.starts_with("chatgpt");
+            || id.starts_with("chatgpt")
+            || id.starts_with("codex-");
 
         let is_excluded = id.contains("realtime")
             || id.contains("audio")
             || id.contains("search")
+            || id.contains("embedding")
+            || id.contains("moderation")
+            || id.contains("tts")
+            || id.contains("whisper")
+            || id.contains("dall-e")
             || id.ends_with("-instruct");
 
-        dominated_by_chat && !is_excluded
+        is_chat && !is_excluded
     }
 
     /// Rough context window estimates per model family
     fn context_window_for(id: &str) -> u32 {
         if id.starts_with("o3") || id.starts_with("o4") || id.starts_with("o1") {
             200_000
+        } else if id.contains("gpt-5") {
+            256_000
         } else if id.contains("gpt-4o") || id.contains("gpt-4.1") {
             128_000
         } else if id.starts_with("chatgpt") {
@@ -644,6 +649,21 @@ impl OpenAiProvider {
     /// Static fallback list if the API call fails
     fn fallback_models() -> Vec<ModelInfo> {
         vec![
+            ModelInfo {
+                id: "gpt-5.4".into(),
+                name: "gpt-5.4".into(),
+                context_window: 256_000,
+            },
+            ModelInfo {
+                id: "gpt-5.4-mini".into(),
+                name: "gpt-5.4-mini".into(),
+                context_window: 256_000,
+            },
+            ModelInfo {
+                id: "gpt-5.4-codex".into(),
+                name: "gpt-5.4-codex".into(),
+                context_window: 256_000,
+            },
             ModelInfo {
                 id: "o3".into(),
                 name: "o3".into(),
