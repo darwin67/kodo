@@ -15,6 +15,12 @@ use crate::types::{
 
 const DEFAULT_API_BASE: &str = "https://api.openai.com/v1";
 
+/// Models that require the Responses API (/v1/responses) instead of
+/// Chat Completions (/v1/chat/completions).
+fn uses_responses_api(model: &str) -> bool {
+    model.starts_with("gpt-5") || model.contains("codex")
+}
+
 // ---------------------------------------------------------------------------
 // OpenAI API request/response types (private)
 // ---------------------------------------------------------------------------
@@ -147,6 +153,110 @@ struct SseFunctionDelta {
     name: Option<String>,
     #[serde(default)]
     arguments: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Responses API types (for GPT-5.x / codex models)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct ResponsesApiRequest {
+    model: String,
+    input: Vec<ResponsesInput>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<ResponsesApiTool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ResponsesReasoning>,
+    stream: bool,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+#[allow(dead_code)]
+enum ResponsesInput {
+    Text(String),
+    Message(ResponsesMessage),
+}
+
+#[derive(Serialize)]
+struct ResponsesMessage {
+    role: String,
+    content: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct ResponsesReasoning {
+    effort: String,
+}
+
+#[derive(Serialize)]
+struct ResponsesApiTool {
+    #[serde(rename = "type")]
+    tool_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parameters: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ResponsesApiResponse {
+    #[serde(default)]
+    output: Vec<ResponsesOutputItem>,
+    #[serde(default)]
+    output_text: Option<String>,
+    #[serde(default)]
+    usage: Option<ResponsesUsage>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    status: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(tag = "type")]
+enum ResponsesOutputItem {
+    #[serde(rename = "message")]
+    Message { content: Vec<ResponsesContentBlock> },
+    #[serde(rename = "function_call")]
+    FunctionCall {
+        id: Option<String>,
+        call_id: Option<String>,
+        name: String,
+        arguments: String,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize, Debug)]
+struct ResponsesContentBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Default)]
+struct ResponsesUsage {
+    #[serde(default)]
+    input_tokens: u32,
+    #[serde(default)]
+    output_tokens: u32,
+}
+
+// Responses API SSE event types
+#[derive(Deserialize, Debug)]
+struct ResponsesSseEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default)]
+    delta: Option<String>,
+    #[serde(default)]
+    item: Option<serde_json::Value>,
+    #[serde(default)]
+    response: Option<ResponsesApiResponse>,
 }
 
 // ---------------------------------------------------------------------------
@@ -330,216 +440,131 @@ impl OpenAiProvider {
             },
         }
     }
+
+    fn build_responses_request(
+        &self,
+        request: &CompletionRequest,
+        stream: bool,
+    ) -> ResponsesApiRequest {
+        let mut input = Vec::new();
+
+        // System prompt as the first input message
+        if let Some(sys) = &request.system {
+            input.push(ResponsesInput::Message(ResponsesMessage {
+                role: "system".into(),
+                content: serde_json::Value::String(sys.clone()),
+            }));
+        }
+
+        // Convert conversation messages
+        for msg in &request.messages {
+            match msg.role {
+                Role::User => {
+                    let has_tool_results = msg
+                        .content
+                        .iter()
+                        .any(|b| matches!(b, ContentBlock::ToolResult { .. }));
+
+                    if has_tool_results {
+                        for block in &msg.content {
+                            if let ContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                is_error,
+                            } = block
+                            {
+                                let content_str = if is_error == &Some(true) {
+                                    format!("Error: {content}")
+                                } else {
+                                    content.clone()
+                                };
+                                input.push(ResponsesInput::Message(ResponsesMessage {
+                                    role: "tool".into(),
+                                    content: serde_json::json!({
+                                        "type": "function_call_output",
+                                        "call_id": tool_use_id,
+                                        "output": content_str,
+                                    }),
+                                }));
+                            }
+                        }
+                    } else {
+                        input.push(ResponsesInput::Message(ResponsesMessage {
+                            role: "user".into(),
+                            content: serde_json::Value::String(msg.text()),
+                        }));
+                    }
+                }
+                Role::Assistant => {
+                    let text = msg.text();
+                    if !text.is_empty() {
+                        input.push(ResponsesInput::Message(ResponsesMessage {
+                            role: "assistant".into(),
+                            content: serde_json::Value::String(text),
+                        }));
+                    }
+                    // Tool calls from assistant are represented as function_call items
+                    for block in msg.tool_uses() {
+                        if let ContentBlock::ToolUse {
+                            id,
+                            name,
+                            input: tool_input,
+                        } = block
+                        {
+                            input.push(ResponsesInput::Message(ResponsesMessage {
+                                role: "assistant".into(),
+                                content: serde_json::json!({
+                                    "type": "function_call",
+                                    "call_id": id,
+                                    "name": name,
+                                    "arguments": serde_json::to_string(tool_input).unwrap_or_default(),
+                                }),
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Convert tools
+        let tools: Vec<ResponsesApiTool> = request
+            .tools
+            .iter()
+            .map(|t| ResponsesApiTool {
+                tool_type: "function".into(),
+                name: Some(t.name.clone()),
+                description: Some(t.description.clone()),
+                parameters: Some(t.input_schema.clone()),
+            })
+            .collect();
+
+        ResponsesApiRequest {
+            model: request.model.clone(),
+            input,
+            tools,
+            reasoning: None,
+            stream,
+        }
+    }
 }
 
 #[async_trait]
 impl Provider for OpenAiProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
-        let api_req = self.build_api_request(&request, false);
-
-        let resp = self
-            .client
-            .post(format!("{}/chat/completions", self.api_base))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&api_req)
-            .send()
-            .await
-            .context("failed to send request to OpenAI API")?;
-
-        let status = resp.status();
-        let body = resp.text().await?;
-
-        if !status.is_success() {
-            bail!("OpenAI API error ({}): {}", status, body);
+        if uses_responses_api(&request.model) {
+            return self.complete_responses(request).await;
         }
-
-        let api_resp: ApiResponse =
-            serde_json::from_str(&body).context("failed to parse OpenAI API response")?;
-
-        let choice = api_resp
-            .choices
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("no choices in OpenAI response"))?;
-
-        let mut content_blocks = Vec::new();
-
-        if let Some(text) = &choice.message.content
-            && !text.is_empty()
-        {
-            content_blocks.push(ContentBlock::text(text));
-        }
-
-        if let Some(tool_calls) = &choice.message.tool_calls {
-            for tc in tool_calls {
-                let input: serde_json::Value = serde_json::from_str(&tc.function.arguments)
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                content_blocks.push(ContentBlock::tool_use(&tc.id, &tc.function.name, input));
-            }
-        }
-
-        let usage = api_resp.usage.unwrap_or_default();
-
-        Ok(CompletionResponse {
-            message: Message {
-                role: Role::Assistant,
-                content: content_blocks,
-            },
-            stop_reason: parse_stop_reason(choice.finish_reason.as_deref()),
-            usage: Usage {
-                input_tokens: usage.prompt_tokens,
-                output_tokens: usage.completion_tokens,
-            },
-        })
+        self.complete_chat(request).await
     }
 
     async fn stream(
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
-        let api_req = self.build_api_request(&request, true);
-
-        let resp = self
-            .client
-            .post(format!("{}/chat/completions", self.api_base))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&api_req)
-            .send()
-            .await
-            .context("failed to send streaming request to OpenAI API")?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await?;
-            bail!("OpenAI API error ({}): {}", status, body);
+        if uses_responses_api(&request.model) {
+            return self.stream_responses(request).await;
         }
-
-        let byte_stream = resp.bytes_stream();
-
-        let event_stream = {
-            let buffer = String::new();
-
-            stream::unfold(
-                (byte_stream, buffer),
-                |(mut byte_stream, mut buffer)| async move {
-                    loop {
-                        if let Some(newline_pos) = buffer.find('\n') {
-                            let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
-                            buffer = buffer[newline_pos + 1..].to_string();
-
-                            if let Some(data) = line.strip_prefix("data: ") {
-                                if data == "[DONE]" {
-                                    return None;
-                                }
-
-                                match serde_json::from_str::<SseChunk>(data) {
-                                    Ok(chunk) => {
-                                        // Handle usage in the final chunk.
-                                        if let Some(usage) = &chunk.usage
-                                            && chunk.choices.is_empty()
-                                        {
-                                            return Some((
-                                                Ok(StreamEvent::MessageDone {
-                                                    stop_reason: StopReason::EndTurn,
-                                                    usage: Usage {
-                                                        input_tokens: usage.prompt_tokens,
-                                                        output_tokens: usage.completion_tokens,
-                                                    },
-                                                }),
-                                                (byte_stream, buffer),
-                                            ));
-                                        }
-
-                                        if let Some(choice) = chunk.choices.first() {
-                                            // Text content delta.
-                                            if let Some(text) = &choice.delta.content
-                                                && !text.is_empty()
-                                            {
-                                                return Some((
-                                                    Ok(StreamEvent::TextDelta {
-                                                        text: text.clone(),
-                                                    }),
-                                                    (byte_stream, buffer),
-                                                ));
-                                            }
-
-                                            // Tool call deltas.
-                                            if let Some(tool_calls) = &choice.delta.tool_calls {
-                                                for tc in tool_calls {
-                                                    if let Some(id) = &tc.id {
-                                                        let name = tc
-                                                            .function
-                                                            .as_ref()
-                                                            .and_then(|f| f.name.clone())
-                                                            .unwrap_or_default();
-                                                        return Some((
-                                                            Ok(StreamEvent::ToolUseStart {
-                                                                id: id.clone(),
-                                                                name,
-                                                            }),
-                                                            (byte_stream, buffer),
-                                                        ));
-                                                    }
-
-                                                    if let Some(func) = &tc.function
-                                                        && let Some(args) = &func.arguments
-                                                        && !args.is_empty()
-                                                    {
-                                                        return Some((
-                                                            Ok(StreamEvent::ToolInputDelta {
-                                                                json: args.clone(),
-                                                            }),
-                                                            (byte_stream, buffer),
-                                                        ));
-                                                    }
-                                                }
-                                            }
-
-                                            // Finish reason.
-                                            if let Some(reason) = &choice.finish_reason {
-                                                let stop = parse_stop_reason(Some(reason.as_str()));
-                                                let usage = chunk.usage.unwrap_or_default();
-                                                return Some((
-                                                    Ok(StreamEvent::MessageDone {
-                                                        stop_reason: stop,
-                                                        usage: Usage {
-                                                            input_tokens: usage.prompt_tokens,
-                                                            output_tokens: usage.completion_tokens,
-                                                        },
-                                                    }),
-                                                    (byte_stream, buffer),
-                                                ));
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        debug!(error = %e, data = data, "failed to parse SSE chunk");
-                                    }
-                                }
-                            }
-
-                            continue;
-                        }
-
-                        match byte_stream.next().await {
-                            Some(Ok(bytes)) => {
-                                buffer.push_str(&String::from_utf8_lossy(&bytes));
-                            }
-                            Some(Err(e)) => {
-                                return Some((
-                                    Err(anyhow::anyhow!("stream read error: {e}")),
-                                    (byte_stream, buffer),
-                                ));
-                            }
-                            None => return None,
-                        }
-                    }
-                },
-            )
-        };
-
-        Ok(Box::pin(event_stream))
+        self.stream_chat(request).await
     }
 
     fn tool_calling_support(&self) -> ToolCallingSupport {
@@ -601,6 +626,461 @@ impl Provider for OpenAiProvider {
         Ok(models)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Chat Completions path (gpt-4.x, o-series, older models)
+// ---------------------------------------------------------------------------
+
+impl OpenAiProvider {
+    async fn complete_chat(&self, request: CompletionRequest) -> Result<CompletionResponse> {
+        let api_req = self.build_api_request(&request, false);
+
+        let resp = self
+            .client
+            .post(format!("{}/chat/completions", self.api_base))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&api_req)
+            .send()
+            .await
+            .context("failed to send request to OpenAI API")?;
+
+        let status = resp.status();
+        let body = resp.text().await?;
+
+        if !status.is_success() {
+            bail!("OpenAI API error ({}): {}", status, body);
+        }
+
+        let api_resp: ApiResponse =
+            serde_json::from_str(&body).context("failed to parse OpenAI API response")?;
+
+        let choice = api_resp
+            .choices
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("no choices in OpenAI response"))?;
+
+        let mut content_blocks = Vec::new();
+
+        if let Some(text) = &choice.message.content
+            && !text.is_empty()
+        {
+            content_blocks.push(ContentBlock::text(text));
+        }
+
+        if let Some(tool_calls) = &choice.message.tool_calls {
+            for tc in tool_calls {
+                let input: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                content_blocks.push(ContentBlock::tool_use(&tc.id, &tc.function.name, input));
+            }
+        }
+
+        let usage = api_resp.usage.unwrap_or_default();
+
+        Ok(CompletionResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: content_blocks,
+            },
+            stop_reason: parse_stop_reason(choice.finish_reason.as_deref()),
+            usage: Usage {
+                input_tokens: usage.prompt_tokens,
+                output_tokens: usage.completion_tokens,
+            },
+        })
+    }
+
+    async fn stream_chat(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        let api_req = self.build_api_request(&request, true);
+
+        let resp = self
+            .client
+            .post(format!("{}/chat/completions", self.api_base))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&api_req)
+            .send()
+            .await
+            .context("failed to send streaming request to OpenAI API")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await?;
+            bail!("OpenAI API error ({}): {}", status, body);
+        }
+
+        let byte_stream = resp.bytes_stream();
+
+        let event_stream = {
+            let buffer = String::new();
+
+            stream::unfold(
+                (byte_stream, buffer),
+                |(mut byte_stream, mut buffer)| async move {
+                    loop {
+                        if let Some(newline_pos) = buffer.find('\n') {
+                            let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
+                            buffer = buffer[newline_pos + 1..].to_string();
+
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                if data == "[DONE]" {
+                                    return None;
+                                }
+
+                                match serde_json::from_str::<SseChunk>(data) {
+                                    Ok(chunk) => {
+                                        if let Some(usage) = &chunk.usage
+                                            && chunk.choices.is_empty()
+                                        {
+                                            return Some((
+                                                Ok(StreamEvent::MessageDone {
+                                                    stop_reason: StopReason::EndTurn,
+                                                    usage: Usage {
+                                                        input_tokens: usage.prompt_tokens,
+                                                        output_tokens: usage.completion_tokens,
+                                                    },
+                                                }),
+                                                (byte_stream, buffer),
+                                            ));
+                                        }
+
+                                        if let Some(choice) = chunk.choices.first() {
+                                            if let Some(text) = &choice.delta.content
+                                                && !text.is_empty()
+                                            {
+                                                return Some((
+                                                    Ok(StreamEvent::TextDelta {
+                                                        text: text.clone(),
+                                                    }),
+                                                    (byte_stream, buffer),
+                                                ));
+                                            }
+
+                                            if let Some(tool_calls) = &choice.delta.tool_calls {
+                                                for tc in tool_calls {
+                                                    if let Some(id) = &tc.id {
+                                                        let name = tc
+                                                            .function
+                                                            .as_ref()
+                                                            .and_then(|f| f.name.clone())
+                                                            .unwrap_or_default();
+                                                        return Some((
+                                                            Ok(StreamEvent::ToolUseStart {
+                                                                id: id.clone(),
+                                                                name,
+                                                            }),
+                                                            (byte_stream, buffer),
+                                                        ));
+                                                    }
+
+                                                    if let Some(func) = &tc.function
+                                                        && let Some(args) = &func.arguments
+                                                        && !args.is_empty()
+                                                    {
+                                                        return Some((
+                                                            Ok(StreamEvent::ToolInputDelta {
+                                                                json: args.clone(),
+                                                            }),
+                                                            (byte_stream, buffer),
+                                                        ));
+                                                    }
+                                                }
+                                            }
+
+                                            if let Some(reason) = &choice.finish_reason {
+                                                let stop = parse_stop_reason(Some(reason.as_str()));
+                                                let usage = chunk.usage.unwrap_or_default();
+                                                return Some((
+                                                    Ok(StreamEvent::MessageDone {
+                                                        stop_reason: stop,
+                                                        usage: Usage {
+                                                            input_tokens: usage.prompt_tokens,
+                                                            output_tokens: usage.completion_tokens,
+                                                        },
+                                                    }),
+                                                    (byte_stream, buffer),
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        debug!(error = %e, data = data, "failed to parse SSE chunk");
+                                    }
+                                }
+                            }
+
+                            continue;
+                        }
+
+                        match byte_stream.next().await {
+                            Some(Ok(bytes)) => {
+                                buffer.push_str(&String::from_utf8_lossy(&bytes));
+                            }
+                            Some(Err(e)) => {
+                                return Some((
+                                    Err(anyhow::anyhow!("stream read error: {e}")),
+                                    (byte_stream, buffer),
+                                ));
+                            }
+                            None => return None,
+                        }
+                    }
+                },
+            )
+        };
+
+        Ok(Box::pin(event_stream))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Responses API path (gpt-5.x, codex models)
+// ---------------------------------------------------------------------------
+
+impl OpenAiProvider {
+    async fn complete_responses(&self, request: CompletionRequest) -> Result<CompletionResponse> {
+        let api_req = self.build_responses_request(&request, false);
+
+        let resp = self
+            .client
+            .post(format!("{}/responses", self.api_base))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&api_req)
+            .send()
+            .await
+            .context("failed to send request to OpenAI Responses API")?;
+
+        let status = resp.status();
+        let body = resp.text().await?;
+
+        if !status.is_success() {
+            bail!("OpenAI API error ({}): {}", status, body);
+        }
+
+        let api_resp: ResponsesApiResponse =
+            serde_json::from_str(&body).context("failed to parse Responses API response")?;
+
+        let mut content_blocks = Vec::new();
+
+        for item in &api_resp.output {
+            match item {
+                ResponsesOutputItem::Message { content } => {
+                    for block in content {
+                        if block.block_type == "output_text" {
+                            if let Some(text) = &block.text {
+                                if !text.is_empty() {
+                                    content_blocks.push(ContentBlock::text(text));
+                                }
+                            }
+                        }
+                    }
+                }
+                ResponsesOutputItem::FunctionCall {
+                    id,
+                    call_id,
+                    name,
+                    arguments,
+                } => {
+                    let tool_id = call_id
+                        .as_deref()
+                        .or(id.as_deref())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let input: serde_json::Value = serde_json::from_str(arguments)
+                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                    content_blocks.push(ContentBlock::tool_use(&tool_id, name, input));
+                }
+                ResponsesOutputItem::Other => {}
+            }
+        }
+
+        // Fallback: if no structured output, use output_text
+        if content_blocks.is_empty() {
+            if let Some(text) = &api_resp.output_text {
+                content_blocks.push(ContentBlock::text(text));
+            }
+        }
+
+        let usage = api_resp.usage.unwrap_or_default();
+
+        let has_tool_calls = content_blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+
+        Ok(CompletionResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: content_blocks,
+            },
+            stop_reason: if has_tool_calls {
+                StopReason::ToolUse
+            } else {
+                StopReason::EndTurn
+            },
+            usage: Usage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+            },
+        })
+    }
+
+    async fn stream_responses(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        let api_req = self.build_responses_request(&request, true);
+
+        let resp = self
+            .client
+            .post(format!("{}/responses", self.api_base))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&api_req)
+            .send()
+            .await
+            .context("failed to send streaming request to OpenAI Responses API")?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await?;
+            bail!("OpenAI API error ({}): {}", status, body);
+        }
+
+        let byte_stream = resp.bytes_stream();
+
+        let event_stream = {
+            let buffer = String::new();
+
+            stream::unfold(
+                (byte_stream, buffer),
+                |(mut byte_stream, mut buffer)| async move {
+                    loop {
+                        if let Some(newline_pos) = buffer.find('\n') {
+                            let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
+                            buffer = buffer[newline_pos + 1..].to_string();
+
+                            if let Some(data) = line.strip_prefix("data: ") {
+                                if data == "[DONE]" {
+                                    return None;
+                                }
+
+                                match serde_json::from_str::<ResponsesSseEvent>(data) {
+                                    Ok(event) => {
+                                        match event.event_type.as_str() {
+                                            "response.output_text.delta" => {
+                                                if let Some(text) = event.delta {
+                                                    if !text.is_empty() {
+                                                        return Some((
+                                                            Ok(StreamEvent::TextDelta { text }),
+                                                            (byte_stream, buffer),
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                            "response.function_call_arguments.delta" => {
+                                                if let Some(json) = event.delta {
+                                                    if !json.is_empty() {
+                                                        return Some((
+                                                            Ok(StreamEvent::ToolInputDelta {
+                                                                json,
+                                                            }),
+                                                            (byte_stream, buffer),
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                            "response.output_item.added" => {
+                                                // Check if it's a function_call item
+                                                if let Some(item) = &event.item {
+                                                    let item_type = item
+                                                        .get("type")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("");
+                                                    if item_type == "function_call" {
+                                                        let id = item
+                                                            .get("call_id")
+                                                            .or_else(|| item.get("id"))
+                                                            .and_then(|v| v.as_str())
+                                                            .unwrap_or("unknown")
+                                                            .to_string();
+                                                        let name = item
+                                                            .get("name")
+                                                            .and_then(|v| v.as_str())
+                                                            .unwrap_or("")
+                                                            .to_string();
+                                                        return Some((
+                                                            Ok(StreamEvent::ToolUseStart {
+                                                                id,
+                                                                name,
+                                                            }),
+                                                            (byte_stream, buffer),
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                            "response.completed" => {
+                                                let (input_tokens, output_tokens) =
+                                                    event.response.as_ref().map_or((0, 0), |r| {
+                                                        r.usage.as_ref().map_or((0, 0), |u| {
+                                                            (u.input_tokens, u.output_tokens)
+                                                        })
+                                                    });
+                                                return Some((
+                                                    Ok(StreamEvent::MessageDone {
+                                                        stop_reason: StopReason::EndTurn,
+                                                        usage: Usage {
+                                                            input_tokens,
+                                                            output_tokens,
+                                                        },
+                                                    }),
+                                                    (byte_stream, buffer),
+                                                ));
+                                            }
+                                            _ => {
+                                                // Ignore other event types
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        debug!(error = %e, data = data, "failed to parse Responses SSE event");
+                                    }
+                                }
+                            }
+
+                            // Also check for event: prefix (Responses API uses "event:" lines)
+                            // The "data:" line follows. We only process "data:" lines.
+                            continue;
+                        }
+
+                        match byte_stream.next().await {
+                            Some(Ok(bytes)) => {
+                                buffer.push_str(&String::from_utf8_lossy(&bytes));
+                            }
+                            Some(Err(e)) => {
+                                return Some((
+                                    Err(anyhow::anyhow!("stream read error: {e}")),
+                                    (byte_stream, buffer),
+                                ));
+                            }
+                            None => return None,
+                        }
+                    }
+                },
+            )
+        };
+
+        Ok(Box::pin(event_stream))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 impl OpenAiProvider {
     /// Filter for models that are useful for chat/coding tasks
@@ -923,11 +1403,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_list_models() {
-        let provider = OpenAiProvider::new("key".into());
+    async fn provider_list_models_fallback() {
+        // With a dummy key, the API call will fail and return the fallback list
+        let provider = OpenAiProvider::new("dummy-key".into());
         let models = provider.list_models().await.unwrap();
         assert!(!models.is_empty());
-        assert!(models.iter().any(|m| m.id.contains("gpt-4o")));
+        assert!(models.iter().any(|m| m.id.contains("gpt-5.4")));
     }
 
     #[test]
