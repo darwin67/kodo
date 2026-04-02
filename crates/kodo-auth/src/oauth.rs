@@ -271,9 +271,18 @@ impl OAuthProvider {
             .append_pair("code_challenge_method", "S256")
             .append_pair("state", &state);
 
-        // Add audience if configured (required by OpenAI OIDC)
+        // Add audience if configured
         if let Some(ref audience) = self.config.audience {
             auth_url.query_pairs_mut().append_pair("audience", audience);
+        }
+
+        // OpenAI-specific extra params for the Codex simplified flow
+        if self.config.provider == "openai" {
+            auth_url
+                .query_pairs_mut()
+                .append_pair("id_token_add_organizations", "true")
+                .append_pair("codex_cli_simplified_flow", "true")
+                .append_pair("originator", "kodo");
         }
 
         Ok((auth_url, verifier, state))
@@ -334,9 +343,19 @@ impl OAuthProvider {
             .layer(CorsLayer::permissive())
             .with_state(callback_state);
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:8899")
+        // Extract host:port from the redirect_uri
+        let redirect_url = Url::parse(&self.config.redirect_uri).context("Invalid redirect_uri")?;
+        let host = redirect_url.host_str().unwrap_or("127.0.0.1");
+        let port = redirect_url.port().unwrap_or(8899);
+        let bind_addr = format!("{}:{}", host, port);
+
+        tracing::debug!("Binding OAuth callback server to {}", bind_addr);
+        let listener = tokio::net::TcpListener::bind(&bind_addr)
             .await
-            .context("Failed to bind OAuth callback server")?;
+            .context(format!(
+                "Failed to bind OAuth callback server on {}",
+                bind_addr
+            ))?;
 
         let server_handle = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
