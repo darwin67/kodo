@@ -160,6 +160,10 @@ async fn send_token_request(
     // The OAuth access_token alone doesn't have API permissions; we need an actual API key.
     if config.provider == "openai" {
         if let Some(id_token) = &token_response.id_token {
+            // Decode JWT payload to log claims (for debugging)
+            if let Some(claims) = decode_jwt_payload(id_token) {
+                tracing::debug!("OpenAI id_token claims: {}", claims);
+            }
             tracing::debug!("OpenAI: exchanging id_token for API key via token exchange");
             let api_key = obtain_openai_api_key(client, config, id_token).await?;
             return Ok(AuthToken {
@@ -191,6 +195,21 @@ async fn send_token_request(
                 + exp
         }),
     })
+}
+
+/// Decode the payload of a JWT (without verification) to inspect claims.
+fn decode_jwt_payload(jwt: &str) -> Option<String> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    let parts: Vec<&str> = jwt.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    // Try with and without padding
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(parts[1])
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(parts[1]))
+        .ok()?;
+    String::from_utf8(payload_bytes).ok()
 }
 
 /// Exchange an OIDC id_token for an OpenAI API key via RFC 8693 Token Exchange.
