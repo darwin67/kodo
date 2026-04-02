@@ -385,6 +385,13 @@ async fn run_agent_loop(
                 model,
                 api_key,
             } => {
+                tracing::debug!(
+                    "SwitchProvider request: provider={}, model={}, api_key_len={}",
+                    provider_name,
+                    model,
+                    api_key.len()
+                );
+
                 // Shutdown old LSP servers
                 agent.shutdown_lsp().await;
 
@@ -394,8 +401,30 @@ async fn run_agent_loop(
                 } else {
                     Some(api_key.as_str())
                 };
+
+                // Log what env vars are available
+                tracing::debug!(
+                    "Env vars: ANTHROPIC_API_KEY={}, OPENAI_API_KEY={}, GEMINI_API_KEY={}",
+                    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+                        "set"
+                    } else {
+                        "unset"
+                    },
+                    if std::env::var("OPENAI_API_KEY").is_ok() {
+                        "set"
+                    } else {
+                        "unset"
+                    },
+                    if std::env::var("GEMINI_API_KEY").is_ok() {
+                        "set"
+                    } else {
+                        "unset"
+                    },
+                );
+
                 match create_provider(&provider_name, api_key_opt) {
                     Ok(provider) => {
+                        tracing::debug!("Provider {} created successfully", provider_name);
                         agent = Agent::new(provider).with_model(&model);
                         agent.set_max_concurrent_subagents(config.general.max_subagents);
                         agent.configure_lsp_servers(
@@ -414,6 +443,7 @@ async fn run_agent_loop(
                         });
                     }
                     Err(e) => {
+                        tracing::error!("Failed to switch to provider {}: {:#}", provider_name, e);
                         let _ = event_tx.send(AgentEvent::Error(format!(
                             "Failed to switch provider: {e:#}"
                         )));
@@ -434,6 +464,7 @@ async fn run_agent_loop_deferred(
     event_tx: &mpsc::UnboundedSender<AgentEvent>,
     config: &Config,
 ) {
+    tracing::debug!("Agent loop started in deferred mode (waiting for provider)");
     while let Some(request) = req_rx.recv().await {
         match request {
             AgentRequest::SwitchProvider {
@@ -441,13 +472,45 @@ async fn run_agent_loop_deferred(
                 model,
                 api_key,
             } => {
+                tracing::debug!(
+                    "Deferred SwitchProvider: provider={}, model={}, api_key_len={}",
+                    provider_name,
+                    model,
+                    api_key.len()
+                );
+
                 let api_key_opt = if api_key.is_empty() {
                     None
                 } else {
                     Some(api_key.as_str())
                 };
+
+                // Log env var state
+                tracing::debug!(
+                    "Env vars: ANTHROPIC_API_KEY={}, OPENAI_API_KEY={}, GEMINI_API_KEY={}",
+                    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+                        "set"
+                    } else {
+                        "unset"
+                    },
+                    if std::env::var("OPENAI_API_KEY").is_ok() {
+                        "set"
+                    } else {
+                        "unset"
+                    },
+                    if std::env::var("GEMINI_API_KEY").is_ok() {
+                        "set"
+                    } else {
+                        "unset"
+                    },
+                );
+
                 match create_provider(&provider_name, api_key_opt) {
                     Ok(provider) => {
+                        tracing::debug!(
+                            "Deferred provider {} created, starting agent loop",
+                            provider_name
+                        );
                         let agent = Agent::new(provider).with_model(&model);
                         save_session_state(&provider_name, &model);
 
@@ -462,6 +525,11 @@ async fn run_agent_loop_deferred(
                         return;
                     }
                     Err(e) => {
+                        tracing::error!(
+                            "Failed to create provider {} in deferred mode: {:#}",
+                            provider_name,
+                            e
+                        );
                         let _ = event_tx.send(AgentEvent::Error(format!(
                             "Failed to create provider: {e:#}"
                         )));
@@ -534,29 +602,41 @@ async fn execute_command(
     }
 }
 
-/// Run the OAuth flow in a background task and send result back to UI
+/// Run the OAuth auto-redirect flow in a background task and send result back to UI
 async fn run_oauth_flow(provider_name: &str, ui_tx: mpsc::UnboundedSender<Message>) {
+    tracing::debug!("Starting OAuth auto-redirect flow for {}", provider_name);
     let config = match provider_name {
         "openai" => AuthConfig::openai(),
         other => {
+            tracing::error!("OAuth auto-redirect not supported for {}", other);
             let _ = ui_tx.send(Message::OAuthError {
                 provider: other.to_string(),
-                error: format!("{} does not support OAuth. Use an API key instead.", other),
+                error: format!(
+                    "{} does not support OAuth auto-redirect. Use an API key instead.",
+                    other
+                ),
             });
             return;
         }
     };
 
+    tracing::debug!(
+        "OAuth config: auth_url={}, token_url={}, redirect_uri={}, client_id={}",
+        config.auth_url,
+        config.token_url,
+        config.redirect_uri,
+        config.client_id
+    );
+
     let oauth = OAuthProvider::new(config);
     match oauth.login().await {
         Ok(token) => {
-            // Store token securely
+            tracing::debug!("OAuth login succeeded for {}, storing token", provider_name);
             let storage = TokenStorage::new("kodo");
             if let Err(e) = storage.store(&token).await {
-                tracing::error!("Failed to store OAuth token: {}", e);
+                tracing::error!("Failed to store OAuth token for {}: {}", provider_name, e);
             }
 
-            // Set env var so provider can use it
             let env_key = match provider_name {
                 "openai" => "OPENAI_API_KEY",
                 _ => return,
@@ -564,6 +644,7 @@ async fn run_oauth_flow(provider_name: &str, ui_tx: mpsc::UnboundedSender<Messag
             unsafe {
                 std::env::set_var(env_key, &token.access_token);
             }
+            tracing::debug!("Set {} env var from OAuth token", env_key);
 
             let _ = ui_tx.send(Message::OAuthComplete {
                 provider: provider_name.to_string(),
@@ -571,6 +652,7 @@ async fn run_oauth_flow(provider_name: &str, ui_tx: mpsc::UnboundedSender<Messag
             });
         }
         Err(e) => {
+            tracing::error!("OAuth login failed for {}: {:#}", provider_name, e);
             let _ = ui_tx.send(Message::OAuthError {
                 provider: provider_name.to_string(),
                 error: format!("{e:#}"),
@@ -581,10 +663,12 @@ async fn run_oauth_flow(provider_name: &str, ui_tx: mpsc::UnboundedSender<Messag
 
 /// Start OAuth code-paste flow: generate URL and send it back to TUI
 async fn start_oauth_code_paste_flow(provider_name: &str, ui_tx: mpsc::UnboundedSender<Message>) {
+    tracing::debug!("Starting OAuth code-paste flow for {}", provider_name);
     let config = match provider_name {
         "anthropic" => AuthConfig::anthropic(),
         "openai" => AuthConfig::openai(),
         other => {
+            tracing::error!("OAuth code-paste not supported for {}", other);
             let _ = ui_tx.send(Message::OAuthError {
                 provider: other.to_string(),
                 error: format!("{} does not support OAuth code-paste flow.", other),
@@ -593,26 +677,38 @@ async fn start_oauth_code_paste_flow(provider_name: &str, ui_tx: mpsc::Unbounded
         }
     };
 
+    tracing::debug!(
+        "OAuth config: auth_url={}, token_url={}, redirect_uri={}, client_id={}",
+        config.auth_url,
+        config.token_url,
+        config.redirect_uri,
+        config.client_id
+    );
+
     let oauth = OAuthProvider::new(config);
     match oauth.start_code_paste_flow() {
         Ok(pending) => {
-            // Open browser automatically
-            let _ = webbrowser::open(&pending.auth_url);
+            tracing::debug!("Code-paste flow started, auth_url: {}", pending.auth_url);
+            if let Err(e) = webbrowser::open(&pending.auth_url) {
+                tracing::error!("Failed to open browser: {}", e);
+            }
 
-            // Clone URL before moving pending into storage
             let auth_url = pending.auth_url.clone();
 
-            // Store the pending flow in a static for later exchange
             let mut guard = PENDING_CODE_PASTE.lock().await;
             *guard = Some(pending);
 
-            // Send the URL back to TUI so user can see it
             let _ = ui_tx.send(Message::OAuthCodePasteReady {
                 provider: provider_name.to_string(),
                 auth_url,
             });
         }
         Err(e) => {
+            tracing::error!(
+                "Failed to start code-paste flow for {}: {:#}",
+                provider_name,
+                e
+            );
             let _ = ui_tx.send(Message::OAuthError {
                 provider: provider_name.to_string(),
                 error: format!("{e:#}"),
@@ -627,12 +723,18 @@ async fn exchange_oauth_code(
     code: &str,
     ui_tx: mpsc::UnboundedSender<Message>,
 ) {
+    tracing::debug!(
+        "Exchanging OAuth code for {} (code length: {})",
+        provider_name,
+        code.len()
+    );
     let pending = {
         let mut guard = PENDING_CODE_PASTE.lock().await;
         guard.take()
     };
 
     let Some(pending) = pending else {
+        tracing::error!("No pending OAuth flow found for {}", provider_name);
         let _ = ui_tx.send(Message::OAuthError {
             provider: provider_name.to_string(),
             error: "No pending OAuth flow. Please start the flow again.".to_string(),
@@ -642,13 +744,12 @@ async fn exchange_oauth_code(
 
     match pending.exchange_code(code).await {
         Ok(token) => {
-            // Store token securely
+            tracing::debug!("OAuth code exchange succeeded for {}", provider_name);
             let storage = TokenStorage::new("kodo");
             if let Err(e) = storage.store(&token).await {
-                tracing::error!("Failed to store OAuth token: {}", e);
+                tracing::error!("Failed to store OAuth token for {}: {}", provider_name, e);
             }
 
-            // Set env var
             let env_key = match provider_name {
                 "anthropic" => "ANTHROPIC_API_KEY",
                 "openai" => "OPENAI_API_KEY",
@@ -663,6 +764,7 @@ async fn exchange_oauth_code(
             unsafe {
                 std::env::set_var(env_key, &token.access_token);
             }
+            tracing::debug!("Set {} env var from OAuth code exchange", env_key);
 
             let _ = ui_tx.send(Message::OAuthComplete {
                 provider: provider_name.to_string(),
@@ -670,6 +772,7 @@ async fn exchange_oauth_code(
             });
         }
         Err(e) => {
+            tracing::error!("OAuth code exchange failed for {}: {:#}", provider_name, e);
             let _ = ui_tx.send(Message::OAuthError {
                 provider: provider_name.to_string(),
                 error: format!("{e:#}"),
@@ -678,9 +781,30 @@ async fn exchange_oauth_code(
     }
 }
 
-/// Store an API key and send success back to UI
+/// Store an API key and set env var so the provider can use it.
 async fn store_api_key(provider_name: &str, api_key: &str, _ui_tx: mpsc::UnboundedSender<Message>) {
-    // Store in keychain via TokenStorage
+    tracing::debug!(
+        "Storing API key for {} (key length: {})",
+        provider_name,
+        api_key.len()
+    );
+
+    // Set env var FIRST so it's available when the provider is created
+    let env_key = match provider_name {
+        "anthropic" => "ANTHROPIC_API_KEY",
+        "openai" => "OPENAI_API_KEY",
+        "gemini" => "GEMINI_API_KEY",
+        _ => {
+            tracing::error!("Unknown provider for API key storage: {}", provider_name);
+            return;
+        }
+    };
+    unsafe {
+        std::env::set_var(env_key, api_key);
+    }
+    tracing::debug!("Set {} env var", env_key);
+
+    // Also persist to keychain for next session
     let storage = TokenStorage::new("kodo");
     let token = AuthToken {
         provider: provider_name.to_string(),
@@ -689,22 +813,14 @@ async fn store_api_key(provider_name: &str, api_key: &str, _ui_tx: mpsc::Unbound
         expires_at: None,
     };
     if let Err(e) = storage.store(&token).await {
-        tracing::error!("Failed to store API key: {}", e);
+        tracing::error!(
+            "Failed to persist API key for {} to keychain: {}",
+            provider_name,
+            e
+        );
+    } else {
+        tracing::debug!("Persisted API key for {} to keychain", provider_name);
     }
-
-    // Set env var so provider can use it immediately
-    let env_key = match provider_name {
-        "anthropic" => "ANTHROPIC_API_KEY",
-        "openai" => "OPENAI_API_KEY",
-        "gemini" => "GEMINI_API_KEY",
-        _ => return,
-    };
-    unsafe {
-        std::env::set_var(env_key, api_key);
-    }
-
-    // The modal will transition to AuthSuccess after StoreApiKey completes.
-    // No additional message needed since the update() already transitions state.
 }
 
 /// Map AgentEvent to application Message
@@ -738,22 +854,48 @@ async fn setup_oauth_tokens() -> Result<()> {
 
     // Try Anthropic
     if std::env::var("ANTHROPIC_API_KEY").is_err() {
-        if let Ok(Some(token)) = storage.get("anthropic").await {
-            unsafe {
-                std::env::set_var("ANTHROPIC_API_KEY", token.access_token);
+        match storage.get("anthropic").await {
+            Ok(Some(token)) => {
+                unsafe {
+                    std::env::set_var("ANTHROPIC_API_KEY", &token.access_token);
+                }
+                tracing::debug!(
+                    "Loaded Anthropic token from storage (len={})",
+                    token.access_token.len()
+                );
             }
-            tracing::debug!("Loaded Anthropic token from storage");
+            Ok(None) => {
+                tracing::debug!("No stored Anthropic token found");
+            }
+            Err(e) => {
+                tracing::error!("Failed to load Anthropic token from storage: {}", e);
+            }
         }
+    } else {
+        tracing::debug!("ANTHROPIC_API_KEY already set in environment");
     }
 
     // Try OpenAI
     if std::env::var("OPENAI_API_KEY").is_err() {
-        if let Ok(Some(token)) = storage.get("openai").await {
-            unsafe {
-                std::env::set_var("OPENAI_API_KEY", token.access_token);
+        match storage.get("openai").await {
+            Ok(Some(token)) => {
+                unsafe {
+                    std::env::set_var("OPENAI_API_KEY", &token.access_token);
+                }
+                tracing::debug!(
+                    "Loaded OpenAI token from storage (len={})",
+                    token.access_token.len()
+                );
             }
-            tracing::debug!("Loaded OpenAI token from storage");
+            Ok(None) => {
+                tracing::debug!("No stored OpenAI token found");
+            }
+            Err(e) => {
+                tracing::error!("Failed to load OpenAI token from storage: {}", e);
+            }
         }
+    } else {
+        tracing::debug!("OPENAI_API_KEY already set in environment");
     }
 
     Ok(())

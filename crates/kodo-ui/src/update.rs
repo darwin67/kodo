@@ -418,7 +418,16 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
             }]
         }
 
-        Message::OAuthError { provider, error } => {
+        Message::OAuthError {
+            provider,
+            ref error,
+        } => {
+            if model.debug_mode {
+                model
+                    .debug_logs
+                    .push(format!("AUTH ERROR [{}]: {}", provider, error));
+            }
+            let error = error.clone();
             model.provider_modal = ProviderModalState::AuthError { provider, error };
             vec![Command::None]
         }

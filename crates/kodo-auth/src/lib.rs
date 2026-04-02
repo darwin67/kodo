@@ -56,11 +56,14 @@ impl AuthConfig {
     /// The user authenticates in the browser, then the browser
     /// displays an authorization code that the user pastes back
     /// into kodo. The code is exchanged for an API key.
+    ///
+    /// Requires `ANTHROPIC_CLIENT_ID` env var to be set, or a registered
+    /// client_id in the kodo config. Register your own OAuth app at
+    /// <https://console.anthropic.com>.
     pub fn anthropic() -> Self {
         Self {
             provider: "anthropic".to_string(),
-            client_id: std::env::var("ANTHROPIC_CLIENT_ID")
-                .unwrap_or_else(|_| "9d1c250a-e61b-44d9-88ed-5944d1962f5e".to_string()),
+            client_id: std::env::var("ANTHROPIC_CLIENT_ID").unwrap_or_default(),
             auth_url: "https://claude.ai/oauth/authorize".to_string(),
             token_url: "https://claude.ai/oauth/token".to_string(),
             redirect_uri: "https://console.anthropic.com/oauth/code/callback".to_string(),
@@ -97,9 +100,9 @@ impl AuthConfig {
         }
     }
 
-    /// Check if this provider supports OAuth (has valid endpoints configured)
+    /// Check if this provider supports OAuth (has valid endpoints and client_id configured)
     pub fn supports_oauth(&self) -> bool {
-        !self.auth_url.is_empty() && !self.token_url.is_empty()
+        !self.client_id.is_empty() && !self.auth_url.is_empty() && !self.token_url.is_empty()
     }
 
     /// Check if this is a code-paste flow (user pastes code from browser)
