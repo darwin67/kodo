@@ -560,6 +560,12 @@ async fn execute_command(
         Command::SendToAgent(message) => {
             let _ = req_tx.send(AgentRequest::ProcessMessage(message));
         }
+        Command::FetchModels { provider } => {
+            let ui_tx = ui_msg_tx.clone();
+            tokio::spawn(async move {
+                fetch_models_for_provider(&provider, ui_tx).await;
+            });
+        }
         Command::StartOAuth { provider } => {
             let ui_tx = ui_msg_tx.clone();
             tokio::spawn(async move {
@@ -777,6 +783,37 @@ async fn exchange_oauth_code(
                 provider: provider_name.to_string(),
                 error: format!("{e:#}"),
             });
+        }
+    }
+}
+
+/// Fetch available models from a provider's API and send them to the UI.
+async fn fetch_models_for_provider(provider_name: &str, ui_tx: mpsc::UnboundedSender<Message>) {
+    tracing::debug!("Fetching models for {}", provider_name);
+
+    match create_provider(provider_name, None) {
+        Ok(provider) => match provider.list_models().await {
+            Ok(models) => {
+                tracing::debug!("Fetched {} models for {}", models.len(), provider_name);
+                let model_list: Vec<(String, String)> =
+                    models.into_iter().map(|m| (m.id.clone(), m.name)).collect();
+                let _ = ui_tx.send(Message::ModelsFetched {
+                    provider: provider_name.to_string(),
+                    models: model_list,
+                });
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch models for {}: {:#}", provider_name, e);
+                // Don't send an error - the static fallback list is already shown
+            }
+        },
+        Err(e) => {
+            tracing::debug!(
+                "Can't create provider {} for model fetch: {:#}",
+                provider_name,
+                e
+            );
+            // Static fallback already shown in the modal
         }
     }
 }

@@ -129,6 +129,11 @@ pub enum Message {
     ModelModalDown,
     /// Select the current model
     ModelModalSelect,
+    /// Models fetched from provider API
+    ModelsFetched {
+        provider: String,
+        models: Vec<(String, String)>, // (id, display_name)
+    },
 
     // -- Provider switching --
     /// Switch to a different provider and model at runtime

@@ -551,23 +551,130 @@ impl Provider for OpenAiProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        Ok(vec![
+        #[derive(Deserialize)]
+        struct ApiModel {
+            id: String,
+        }
+        #[derive(Deserialize)]
+        struct ApiModelList {
+            data: Vec<ApiModel>,
+        }
+
+        let url = format!("{}/models", self.api_base);
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .send()
+            .await
+            .context("Failed to fetch OpenAI models")?;
+
+        if !resp.status().is_success() {
+            debug!("Failed to fetch models from API, using fallback list");
+            return Ok(Self::fallback_models());
+        }
+
+        let list: ApiModelList = resp.json().await.context("Failed to parse model list")?;
+
+        // Filter to chat-capable models and sort alphabetically
+        let mut models: Vec<ModelInfo> = list
+            .data
+            .into_iter()
+            .filter(|m| Self::is_chat_model(&m.id))
+            .map(|m| {
+                let context_window = Self::context_window_for(&m.id);
+                let name = m.id.clone();
+                ModelInfo {
+                    id: m.id,
+                    name,
+                    context_window,
+                }
+            })
+            .collect();
+
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+
+        if models.is_empty() {
+            return Ok(Self::fallback_models());
+        }
+
+        Ok(models)
+    }
+}
+
+impl OpenAiProvider {
+    /// Filter for models that are useful for chat/coding tasks
+    fn is_chat_model(id: &str) -> bool {
+        // Include gpt-4*, gpt-3.5*, o1*, o3*, o4* models
+        // Exclude embeddings, tts, whisper, dall-e, moderation, etc.
+        let dominated_by_chat = id.starts_with("gpt-4")
+            || id.starts_with("gpt-3.5")
+            || id.starts_with("o1")
+            || id.starts_with("o3")
+            || id.starts_with("o4")
+            || id.starts_with("chatgpt");
+
+        let is_excluded = id.contains("realtime")
+            || id.contains("audio")
+            || id.contains("search")
+            || id.ends_with("-instruct");
+
+        dominated_by_chat && !is_excluded
+    }
+
+    /// Rough context window estimates per model family
+    fn context_window_for(id: &str) -> u32 {
+        if id.starts_with("o3") || id.starts_with("o4") || id.starts_with("o1") {
+            200_000
+        } else if id.contains("gpt-4o") || id.contains("gpt-4.1") {
+            128_000
+        } else if id.starts_with("chatgpt") {
+            128_000
+        } else if id.contains("gpt-4-turbo") {
+            128_000
+        } else if id.starts_with("gpt-4") {
+            8_192
+        } else if id.starts_with("gpt-3.5") {
+            16_385
+        } else {
+            128_000
+        }
+    }
+
+    /// Static fallback list if the API call fails
+    fn fallback_models() -> Vec<ModelInfo> {
+        vec![
+            ModelInfo {
+                id: "o3".into(),
+                name: "o3".into(),
+                context_window: 200_000,
+            },
+            ModelInfo {
+                id: "o4-mini".into(),
+                name: "o4-mini".into(),
+                context_window: 200_000,
+            },
+            ModelInfo {
+                id: "gpt-4.1".into(),
+                name: "gpt-4.1".into(),
+                context_window: 128_000,
+            },
+            ModelInfo {
+                id: "gpt-4.1-mini".into(),
+                name: "gpt-4.1-mini".into(),
+                context_window: 128_000,
+            },
             ModelInfo {
                 id: "gpt-4o".into(),
-                name: "GPT-4o".into(),
+                name: "gpt-4o".into(),
                 context_window: 128_000,
             },
             ModelInfo {
                 id: "gpt-4o-mini".into(),
-                name: "GPT-4o Mini".into(),
+                name: "gpt-4o-mini".into(),
                 context_window: 128_000,
             },
-            ModelInfo {
-                id: "o3-mini".into(),
-                name: "o3-mini".into(),
-                context_window: 200_000,
-            },
-        ])
+        ]
     }
 }
 

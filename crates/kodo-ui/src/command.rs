@@ -23,6 +23,10 @@ pub enum Command {
     /// Exchange an OAuth authorization code (from code-paste flow) for a token.
     ExchangeOAuthCode { provider: String, code: String },
 
+    /// Fetch available models for a provider.
+    /// The runtime will query the provider API and send back the results.
+    FetchModels { provider: String },
+
     /// Store an API key for a provider and initialize it.
     /// The runtime will save the key and create the provider.
     StoreApiKey { provider: String, api_key: String },

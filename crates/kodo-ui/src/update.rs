@@ -455,9 +455,10 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
         Message::OpenModelModal => {
             model.model_modal = ModelModalState::SelectModel;
             model.model_modal_selected = 0;
-            // Populate model options based on current provider
+            // Start with static fallback, then fetch dynamic list
             model.model_options = models_for_provider(&model.provider);
-            vec![Command::None]
+            let provider = model.provider.clone();
+            vec![Command::FetchModels { provider }]
         }
 
         Message::CloseModelModal => {
@@ -478,6 +479,25 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
         }
 
         Message::ModelModalSelect => handle_model_modal_select(model),
+
+        Message::ModelsFetched { provider, models } => {
+            // Only update if the modal is still showing the same provider
+            if model.model_modal != ModelModalState::Closed {
+                model.model_options = models
+                    .into_iter()
+                    .map(|(id, display_name)| ModelOption {
+                        id,
+                        display_name,
+                        provider: provider.clone(),
+                    })
+                    .collect();
+                // Reset selection if it's out of bounds
+                if model.model_modal_selected >= model.model_options.len() {
+                    model.model_modal_selected = 0;
+                }
+            }
+            vec![Command::None]
+        }
 
         // -- Provider switching --
         Message::SwitchProvider {
@@ -655,7 +675,9 @@ fn handle_provider_modal_select(model: &mut Model) -> Vec<Command> {
                     model.model_options = models_for_provider(&provider);
                     model.model_modal = ModelModalState::SelectModel;
                     model.model_modal_selected = 0;
-                    return vec![Command::None];
+                    return vec![Command::FetchModels {
+                        provider: provider.clone(),
+                    }];
                 }
 
                 if is_authenticated {
@@ -664,7 +686,9 @@ fn handle_provider_modal_select(model: &mut Model) -> Vec<Command> {
                     model.model_options = models_for_provider(&provider);
                     model.model_modal = ModelModalState::SelectModel;
                     model.model_modal_selected = 0;
-                    return vec![Command::None];
+                    return vec![Command::FetchModels {
+                        provider: provider.clone(),
+                    }];
                 }
 
                 if auth_methods.len() == 1 {
@@ -699,7 +723,9 @@ fn handle_provider_modal_select(model: &mut Model) -> Vec<Command> {
             model.model_options = models_for_provider(&provider);
             model.model_modal = ModelModalState::SelectModel;
             model.model_modal_selected = 0;
-            vec![Command::None]
+            vec![Command::FetchModels {
+                provider: provider.clone(),
+            }]
         }
         ProviderModalState::AuthError { .. } => {
             // Go back to provider selection
@@ -754,6 +780,31 @@ fn models_for_provider(provider: &str) -> Vec<ModelOption> {
             },
         ],
         "openai" => vec![
+            ModelOption {
+                id: "o3".to_string(),
+                display_name: "o3".to_string(),
+                provider: "openai".to_string(),
+            },
+            ModelOption {
+                id: "o4-mini".to_string(),
+                display_name: "o4-mini".to_string(),
+                provider: "openai".to_string(),
+            },
+            ModelOption {
+                id: "gpt-4.1".to_string(),
+                display_name: "GPT-4.1".to_string(),
+                provider: "openai".to_string(),
+            },
+            ModelOption {
+                id: "gpt-4.1-mini".to_string(),
+                display_name: "GPT-4.1 Mini".to_string(),
+                provider: "openai".to_string(),
+            },
+            ModelOption {
+                id: "gpt-4.1-nano".to_string(),
+                display_name: "GPT-4.1 Nano".to_string(),
+                provider: "openai".to_string(),
+            },
             ModelOption {
                 id: "gpt-4o".to_string(),
                 display_name: "GPT-4o".to_string(),
@@ -838,10 +889,11 @@ fn handle_palette_select(model: &mut Model) -> Vec<Command> {
             vec![Command::None]
         }
         "switch_model" => {
-            model.model_options = models_for_provider(&model.provider);
+            let provider = model.provider.clone();
+            model.model_options = models_for_provider(&provider);
             model.model_modal = ModelModalState::SelectModel;
             model.model_modal_selected = 0;
-            vec![Command::None]
+            vec![Command::FetchModels { provider }]
         }
         _ => vec![Command::None],
     }

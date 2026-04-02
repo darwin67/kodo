@@ -539,11 +539,15 @@ impl Provider for AnthropicProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        // Hardcoded for now; could query API later.
         Ok(vec![
             ModelInfo {
                 id: "claude-sonnet-4-20250514".into(),
                 name: "Claude Sonnet 4".into(),
+                context_window: 200_000,
+            },
+            ModelInfo {
+                id: "claude-opus-4-20250514".into(),
+                name: "Claude Opus 4".into(),
                 context_window: 200_000,
             },
             ModelInfo {
