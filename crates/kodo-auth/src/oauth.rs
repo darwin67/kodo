@@ -80,19 +80,40 @@ impl PendingCodePaste {
             .await
             .context("Failed to exchange authorization code")?;
 
-        if !response.status().is_success() {
-            let error: OAuthError = response.json().await.unwrap_or(OAuthError {
-                error: "unknown".to_string(),
-                error_description: Some("Failed to parse error response".to_string()),
-            });
-            anyhow::bail!(
-                "OAuth token exchange failed: {} - {}",
-                error.error,
-                error.error_description.unwrap_or_default()
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "(failed to read response body)".to_string());
+            tracing::error!(
+                "Token exchange failed: status={}, url={}, body={}",
+                status,
+                self.config.token_url,
+                body
             );
+
+            // Try to parse as structured error, fall back to raw body
+            if let Ok(error) = serde_json::from_str::<OAuthError>(&body) {
+                anyhow::bail!(
+                    "OAuth token exchange failed ({}): {} - {}",
+                    status,
+                    error.error,
+                    error.error_description.unwrap_or_default()
+                );
+            } else {
+                anyhow::bail!("OAuth token exchange failed ({}): {}", status, body);
+            }
         }
 
-        let token_response: TokenResponse = response.json().await?;
+        let body = response
+            .text()
+            .await
+            .context("Failed to read token response body")?;
+        tracing::debug!("Token response body: {}", body);
+
+        let token_response: TokenResponse = serde_json::from_str(&body)
+            .context(format!("Failed to parse token response: {}", body))?;
 
         Ok(AuthToken {
             provider: self.config.provider.clone(),
@@ -207,6 +228,15 @@ impl OAuthProvider {
             ("code_verifier", verifier),
         ];
 
+        tracing::debug!(
+            "Exchanging code: token_url={}, client_id={}, redirect_uri={}, code_len={}, verifier_len={}",
+            self.config.token_url,
+            self.config.client_id,
+            self.config.redirect_uri,
+            code.len(),
+            verifier.len()
+        );
+
         let response = self
             .http_client
             .post(&self.config.token_url)
@@ -215,19 +245,39 @@ impl OAuthProvider {
             .await
             .context("Failed to exchange authorization code")?;
 
-        if !response.status().is_success() {
-            let error: OAuthError = response.json().await.unwrap_or(OAuthError {
-                error: "unknown".to_string(),
-                error_description: Some("Failed to parse error response".to_string()),
-            });
-            anyhow::bail!(
-                "OAuth token exchange failed: {} - {}",
-                error.error,
-                error.error_description.unwrap_or_default()
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "(failed to read response body)".to_string());
+            tracing::error!(
+                "Token exchange failed: status={}, url={}, body={}",
+                status,
+                self.config.token_url,
+                body
             );
+
+            if let Ok(error) = serde_json::from_str::<OAuthError>(&body) {
+                anyhow::bail!(
+                    "OAuth token exchange failed ({}): {} - {}",
+                    status,
+                    error.error,
+                    error.error_description.unwrap_or_default()
+                );
+            } else {
+                anyhow::bail!("OAuth token exchange failed ({}): {}", status, body);
+            }
         }
 
-        let token_response: TokenResponse = response.json().await?;
+        let body = response
+            .text()
+            .await
+            .context("Failed to read token response body")?;
+        tracing::debug!("Token response body: {}", body);
+
+        let token_response: TokenResponse = serde_json::from_str(&body)
+            .context(format!("Failed to parse token response: {}", body))?;
 
         Ok(AuthToken {
             provider: self.config.provider.clone(),

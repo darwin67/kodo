@@ -50,28 +50,22 @@ pub struct AuthConfig {
 }
 
 impl AuthConfig {
-    /// Create config for Anthropic OAuth.
+    /// Create config for Anthropic.
     ///
-    /// Uses claude.ai OAuth with PKCE (code-paste flow).
-    /// The user authenticates in the browser, then the browser
-    /// displays an authorization code that the user pastes back
-    /// into kodo. The code is exchanged for an API key.
+    /// Anthropic does not have a documented public OAuth token exchange
+    /// endpoint for third-party tools. Authentication is done via API
+    /// keys from console.anthropic.com / platform.claude.com.
     ///
-    /// Requires `ANTHROPIC_CLIENT_ID` env var to be set, or a registered
-    /// client_id in the kodo config. Register your own OAuth app at
-    /// <https://console.anthropic.com>.
+    /// OAuth fields are left empty so `supports_oauth()` returns false
+    /// and the TUI only shows the API key entry option.
     pub fn anthropic() -> Self {
         Self {
             provider: "anthropic".to_string(),
-            client_id: std::env::var("ANTHROPIC_CLIENT_ID").unwrap_or_default(),
-            auth_url: "https://claude.ai/oauth/authorize".to_string(),
-            token_url: "https://claude.ai/oauth/token".to_string(),
-            redirect_uri: "https://console.anthropic.com/oauth/code/callback".to_string(),
-            scopes: vec![
-                "org:create_api_key".to_string(),
-                "user:profile".to_string(),
-                "user:inference".to_string(),
-            ],
+            client_id: String::new(),
+            auth_url: String::new(),
+            token_url: String::new(),
+            redirect_uri: String::new(),
+            scopes: vec![],
             flow_type: OAuthFlowType::CodePaste,
         }
     }
