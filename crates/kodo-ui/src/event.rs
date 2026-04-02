@@ -160,6 +160,16 @@ fn map_provider_modal_input(key: &KeyEvent, model: &Model) -> Option<Message> {
                 _ => None,
             }
         }
+        ProviderModalState::EnterOAuthCode { .. } => {
+            // OAuth code-paste input mode
+            match key.code {
+                KeyCode::Char(ch) => Some(Message::ProviderModalApiKeyInput(ch)),
+                KeyCode::Backspace => Some(Message::ProviderModalApiKeyBackspace),
+                KeyCode::Enter => Some(Message::ProviderModalOAuthCodeSubmit),
+                KeyCode::Esc => Some(Message::ProviderModalBack),
+                _ => None,
+            }
+        }
         ProviderModalState::OAuthInProgress { .. } => {
             // Only allow escape/back while waiting for OAuth
             match key.code {

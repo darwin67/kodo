@@ -477,7 +477,8 @@ fn render_provider_modal(frame: &mut Frame, model: &Model, area: Rect) {
                         "  "
                     };
                     let label = match method {
-                        AuthMethod::OAuth => "Browser Login (OAuth)",
+                        AuthMethod::OAuth => "Browser Login (auto-redirect)",
+                        AuthMethod::OAuthCodePaste => "Browser Login (paste code)",
                         AuthMethod::ApiKey => "Enter API Key",
                     };
                     let style = if i == model.auth_method_selected {
@@ -550,25 +551,70 @@ fn render_provider_modal(frame: &mut Frame, model: &Model, area: Rect) {
             frame.render_widget(panel, modal_area);
         }
 
-        ProviderModalState::OAuthInProgress { provider } => {
+        ProviderModalState::EnterOAuthCode { provider, auth_url } => {
             let mut lines = Vec::new();
             lines.push(Line::raw(""));
             lines.push(Line::styled(
-                "  Opening browser for authentication...",
+                "  1. Open this URL in your browser:",
+                model.theme.text_style(),
+            ));
+            lines.push(Line::raw(""));
+            // Truncate URL for display if needed
+            let display_url = if auth_url.len() > (width as usize - 6) {
+                format!("  {}...", &auth_url[..width as usize - 9])
+            } else {
+                format!("  {}", auth_url)
+            };
+            lines.push(Line::styled(display_url, model.theme.accent_style()));
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "  2. Sign in and authorize kodo",
                 model.theme.text_style(),
             ));
             lines.push(Line::raw(""));
             lines.push(Line::styled(
-                format!("  Waiting for {} to authorize...", provider),
+                "  3. Paste the authorization code below:",
+                model.theme.text_style(),
+            ));
+            lines.push(Line::raw(""));
+
+            // Show code input
+            let code_display = if model.api_key_input.is_empty() {
+                "  > (paste authorization code here)".to_string()
+            } else {
+                format!("  > {}", model.api_key_input)
+            };
+            let code_style = if model.api_key_input.is_empty() {
+                model.theme.muted_style()
+            } else {
+                model.theme.text_style().add_modifier(Modifier::BOLD)
+            };
+            lines.push(Line::styled(code_display, code_style));
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "  [Enter] Submit  [Esc] Back",
                 model.theme.muted_style(),
+            ));
+
+            let panel = Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(model.theme.accent_style())
+                    .title(format!(" {} - Paste Auth Code ", provider)),
+            );
+            frame.render_widget(panel, modal_area);
+        }
+
+        ProviderModalState::OAuthInProgress { provider } => {
+            let mut lines = Vec::new();
+            lines.push(Line::raw(""));
+            lines.push(Line::styled(
+                "  Exchanging authorization code...",
+                model.theme.text_style(),
             ));
             lines.push(Line::raw(""));
             lines.push(Line::styled(
-                "  Complete the login in your browser.",
-                model.theme.muted_style(),
-            ));
-            lines.push(Line::styled(
-                "  This window will update automatically.",
+                format!("  Waiting for {} to respond...", provider),
                 model.theme.muted_style(),
             ));
             lines.push(Line::raw(""));

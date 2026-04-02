@@ -101,12 +101,16 @@ pub enum Message {
     ProviderModalDown,
     /// Select the current item in provider modal (enter)
     ProviderModalSelect,
-    /// User chose to enter API key manually
+    /// User typed a character in a text input (API key or OAuth code)
     ProviderModalApiKeyInput(char),
-    /// User pressed backspace in API key input
+    /// User pressed backspace in a text input (API key or OAuth code)
     ProviderModalApiKeyBackspace,
     /// User submitted their API key
     ProviderModalApiKeySubmit,
+    /// User submitted the OAuth authorization code (code-paste flow)
+    ProviderModalOAuthCodeSubmit,
+    /// OAuth code-paste flow started: URL ready for user to open
+    OAuthCodePasteReady { provider: String, auth_url: String },
     /// OAuth flow completed successfully
     OAuthComplete { provider: String, token: String },
     /// OAuth flow failed

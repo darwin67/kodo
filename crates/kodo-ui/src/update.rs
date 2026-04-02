@@ -351,14 +351,21 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
         Message::ProviderModalSelect => handle_provider_modal_select(model),
 
         Message::ProviderModalApiKeyInput(ch) => {
-            if matches!(model.provider_modal, ProviderModalState::EnterApiKey { .. }) {
+            // Works for both API key input and OAuth code input
+            if matches!(
+                model.provider_modal,
+                ProviderModalState::EnterApiKey { .. } | ProviderModalState::EnterOAuthCode { .. }
+            ) {
                 model.api_key_input.push(ch);
             }
             vec![Command::None]
         }
 
         Message::ProviderModalApiKeyBackspace => {
-            if matches!(model.provider_modal, ProviderModalState::EnterApiKey { .. }) {
+            if matches!(
+                model.provider_modal,
+                ProviderModalState::EnterApiKey { .. } | ProviderModalState::EnterOAuthCode { .. }
+            ) {
                 model.api_key_input.pop();
             }
             vec![Command::None]
@@ -376,6 +383,27 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
                     return vec![Command::StoreApiKey { provider, api_key }];
                 }
             }
+            vec![Command::None]
+        }
+
+        Message::ProviderModalOAuthCodeSubmit => {
+            if let ProviderModalState::EnterOAuthCode { ref provider, .. } = model.provider_modal {
+                if !model.api_key_input.is_empty() {
+                    let provider = provider.clone();
+                    let code = model.api_key_input.clone();
+                    model.api_key_input.clear();
+                    model.provider_modal = ProviderModalState::OAuthInProgress {
+                        provider: provider.clone(),
+                    };
+                    return vec![Command::ExchangeOAuthCode { provider, code }];
+                }
+            }
+            vec![Command::None]
+        }
+
+        Message::OAuthCodePasteReady { provider, auth_url } => {
+            model.provider_modal = ProviderModalState::EnterOAuthCode { provider, auth_url };
+            model.api_key_input.clear();
             vec![Command::None]
         }
 
@@ -399,6 +427,7 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
             match &model.provider_modal {
                 ProviderModalState::SelectAuthMethod { .. }
                 | ProviderModalState::EnterApiKey { .. }
+                | ProviderModalState::EnterOAuthCode { .. }
                 | ProviderModalState::AuthError { .. } => {
                     model.provider_modal = ProviderModalState::SelectProvider;
                     model.api_key_input.clear();
@@ -576,6 +605,28 @@ fn handle_input_submit(model: &mut Model) -> Vec<Command> {
     vec![Command::send_to_agent(user_input)]
 }
 
+/// Dispatch the appropriate action for an auth method
+fn dispatch_auth_method(model: &mut Model, method: &AuthMethod, provider: String) -> Vec<Command> {
+    match method {
+        AuthMethod::OAuth => {
+            model.provider_modal = ProviderModalState::OAuthInProgress {
+                provider: provider.clone(),
+            };
+            vec![Command::StartOAuth { provider }]
+        }
+        AuthMethod::OAuthCodePaste => {
+            // Start code-paste flow: runtime will generate URL and send it back
+            vec![Command::StartOAuthCodePaste {
+                provider: provider.clone(),
+            }]
+        }
+        AuthMethod::ApiKey => {
+            model.provider_modal = ProviderModalState::EnterApiKey { provider };
+            vec![Command::None]
+        }
+    }
+}
+
 /// Handle selecting an item in the provider connect modal
 fn handle_provider_modal_select(model: &mut Model) -> Vec<Command> {
     match model.provider_modal.clone() {
@@ -583,10 +634,13 @@ fn handle_provider_modal_select(model: &mut Model) -> Vec<Command> {
             let idx = model
                 .provider_modal_selected
                 .min(model.provider_options.len().saturating_sub(1));
-            if let Some(option) = model.provider_options.get(idx) {
-                let provider = option.id.clone();
-
-                if option.auth_methods.is_empty() {
+            // Clone needed data before mutably borrowing model
+            let option_data = model
+                .provider_options
+                .get(idx)
+                .map(|o| (o.id.clone(), o.auth_methods.clone(), o.is_authenticated));
+            if let Some((provider, auth_methods, is_authenticated)) = option_data {
+                if auth_methods.is_empty() {
                     // No auth needed (e.g. Ollama) - go straight to model selection
                     model.provider_modal = ProviderModalState::Closed;
                     model.model_options = models_for_provider(&provider);
@@ -595,7 +649,7 @@ fn handle_provider_modal_select(model: &mut Model) -> Vec<Command> {
                     return vec![Command::None];
                 }
 
-                if option.is_authenticated {
+                if is_authenticated {
                     // Already authenticated - go straight to model selection
                     model.provider_modal = ProviderModalState::Closed;
                     model.model_options = models_for_provider(&provider);
@@ -604,19 +658,9 @@ fn handle_provider_modal_select(model: &mut Model) -> Vec<Command> {
                     return vec![Command::None];
                 }
 
-                if option.auth_methods.len() == 1 {
+                if auth_methods.len() == 1 {
                     // Only one auth method, use it directly
-                    match option.auth_methods[0] {
-                        AuthMethod::OAuth => {
-                            model.provider_modal = ProviderModalState::OAuthInProgress {
-                                provider: provider.clone(),
-                            };
-                            return vec![Command::StartOAuth { provider }];
-                        }
-                        AuthMethod::ApiKey => {
-                            model.provider_modal = ProviderModalState::EnterApiKey { provider };
-                        }
-                    }
+                    return dispatch_auth_method(model, &auth_methods[0], provider);
                 } else {
                     // Multiple auth methods, show selection
                     model.provider_modal = ProviderModalState::SelectAuthMethod { provider };
@@ -628,20 +672,14 @@ fn handle_provider_modal_select(model: &mut Model) -> Vec<Command> {
         ProviderModalState::SelectAuthMethod { ref provider } => {
             let provider = provider.clone();
             let idx = model.auth_method_selected;
-            if let Some(option) = model.provider_options.iter().find(|o| o.id == provider) {
-                if let Some(method) = option.auth_methods.get(idx) {
-                    match method {
-                        AuthMethod::OAuth => {
-                            model.provider_modal = ProviderModalState::OAuthInProgress {
-                                provider: provider.clone(),
-                            };
-                            return vec![Command::StartOAuth { provider }];
-                        }
-                        AuthMethod::ApiKey => {
-                            model.provider_modal = ProviderModalState::EnterApiKey { provider };
-                        }
-                    }
-                }
+            // Clone method before mutable borrow
+            let method = model
+                .provider_options
+                .iter()
+                .find(|o| o.id == provider)
+                .and_then(|o| o.auth_methods.get(idx).cloned());
+            if let Some(method) = method {
+                return dispatch_auth_method(model, &method, provider);
             }
             vec![Command::None]
         }

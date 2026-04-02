@@ -3,10 +3,20 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::Parser;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 
-use kodo_auth::{AuthConfig, AuthProvider, AuthToken, oauth::OAuthProvider, storage::TokenStorage};
+use kodo_auth::{
+    AuthConfig, AuthProvider, AuthToken,
+    oauth::{OAuthProvider, PendingCodePaste},
+    storage::TokenStorage,
+};
 use kodo_config::{Config, loader::load_or_default};
+
+/// Global storage for a pending OAuth code-paste flow.
+/// This is set when the user starts a code-paste flow and consumed
+/// when they submit the authorization code.
+static PENDING_CODE_PASTE: std::sync::LazyLock<Mutex<Option<PendingCodePaste>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
 use kodo_core::agent::{Agent, AgentEvent};
 use kodo_llm::anthropic::AnthropicProvider;
 use kodo_llm::gemini::GeminiProvider;
@@ -133,12 +143,17 @@ async fn build_provider_options() -> Vec<ProviderOption> {
 
     let openai_config = AuthConfig::openai();
 
+    let anthropic_config = AuthConfig::anthropic();
+
     vec![
         ProviderOption {
             id: "anthropic".to_string(),
             display_name: "Anthropic (Claude)".to_string(),
-            // Anthropic has no public OAuth; API key only
-            auth_methods: vec![AuthMethod::ApiKey],
+            auth_methods: if anthropic_config.supports_oauth() {
+                vec![AuthMethod::OAuthCodePaste, AuthMethod::ApiKey]
+            } else {
+                vec![AuthMethod::ApiKey]
+            },
             is_authenticated: anthropic_authed,
         },
         ProviderOption {
@@ -483,6 +498,18 @@ async fn execute_command(
                 run_oauth_flow(&provider, ui_tx).await;
             });
         }
+        Command::StartOAuthCodePaste { provider } => {
+            let ui_tx = ui_msg_tx.clone();
+            tokio::spawn(async move {
+                start_oauth_code_paste_flow(&provider, ui_tx).await;
+            });
+        }
+        Command::ExchangeOAuthCode { provider, code } => {
+            let ui_tx = ui_msg_tx.clone();
+            tokio::spawn(async move {
+                exchange_oauth_code(&provider, &code, ui_tx).await;
+            });
+        }
         Command::StoreApiKey { provider, api_key } => {
             let ui_tx = ui_msg_tx.clone();
             tokio::spawn(async move {
@@ -533,6 +560,105 @@ async fn run_oauth_flow(provider_name: &str, ui_tx: mpsc::UnboundedSender<Messag
             let env_key = match provider_name {
                 "openai" => "OPENAI_API_KEY",
                 _ => return,
+            };
+            unsafe {
+                std::env::set_var(env_key, &token.access_token);
+            }
+
+            let _ = ui_tx.send(Message::OAuthComplete {
+                provider: provider_name.to_string(),
+                token: token.access_token,
+            });
+        }
+        Err(e) => {
+            let _ = ui_tx.send(Message::OAuthError {
+                provider: provider_name.to_string(),
+                error: format!("{e:#}"),
+            });
+        }
+    }
+}
+
+/// Start OAuth code-paste flow: generate URL and send it back to TUI
+async fn start_oauth_code_paste_flow(provider_name: &str, ui_tx: mpsc::UnboundedSender<Message>) {
+    let config = match provider_name {
+        "anthropic" => AuthConfig::anthropic(),
+        "openai" => AuthConfig::openai(),
+        other => {
+            let _ = ui_tx.send(Message::OAuthError {
+                provider: other.to_string(),
+                error: format!("{} does not support OAuth code-paste flow.", other),
+            });
+            return;
+        }
+    };
+
+    let oauth = OAuthProvider::new(config);
+    match oauth.start_code_paste_flow() {
+        Ok(pending) => {
+            // Open browser automatically
+            let _ = webbrowser::open(&pending.auth_url);
+
+            // Clone URL before moving pending into storage
+            let auth_url = pending.auth_url.clone();
+
+            // Store the pending flow in a static for later exchange
+            let mut guard = PENDING_CODE_PASTE.lock().await;
+            *guard = Some(pending);
+
+            // Send the URL back to TUI so user can see it
+            let _ = ui_tx.send(Message::OAuthCodePasteReady {
+                provider: provider_name.to_string(),
+                auth_url,
+            });
+        }
+        Err(e) => {
+            let _ = ui_tx.send(Message::OAuthError {
+                provider: provider_name.to_string(),
+                error: format!("{e:#}"),
+            });
+        }
+    }
+}
+
+/// Exchange a user-pasted OAuth code for a token
+async fn exchange_oauth_code(
+    provider_name: &str,
+    code: &str,
+    ui_tx: mpsc::UnboundedSender<Message>,
+) {
+    let pending = {
+        let mut guard = PENDING_CODE_PASTE.lock().await;
+        guard.take()
+    };
+
+    let Some(pending) = pending else {
+        let _ = ui_tx.send(Message::OAuthError {
+            provider: provider_name.to_string(),
+            error: "No pending OAuth flow. Please start the flow again.".to_string(),
+        });
+        return;
+    };
+
+    match pending.exchange_code(code).await {
+        Ok(token) => {
+            // Store token securely
+            let storage = TokenStorage::new("kodo");
+            if let Err(e) = storage.store(&token).await {
+                tracing::error!("Failed to store OAuth token: {}", e);
+            }
+
+            // Set env var
+            let env_key = match provider_name {
+                "anthropic" => "ANTHROPIC_API_KEY",
+                "openai" => "OPENAI_API_KEY",
+                _ => {
+                    let _ = ui_tx.send(Message::OAuthComplete {
+                        provider: provider_name.to_string(),
+                        token: token.access_token,
+                    });
+                    return;
+                }
             };
             unsafe {
                 std::env::set_var(env_key, &token.access_token);
@@ -636,13 +762,7 @@ async fn setup_oauth_tokens() -> Result<()> {
 /// Handle --auth CLI flag (non-TUI OAuth flow)
 async fn handle_auth(provider_name: &str) -> Result<()> {
     let config = match provider_name {
-        "anthropic" => {
-            println!("Anthropic does not support OAuth. Please set your API key:");
-            println!("  export ANTHROPIC_API_KEY=your-api-key");
-            println!();
-            println!("Or run kodo and use the provider connect dialog to enter your key.");
-            return Ok(());
-        }
+        "anthropic" => AuthConfig::anthropic(),
         "openai" => AuthConfig::openai(),
         _ => bail!(
             "Unsupported auth provider: {}. Available: anthropic, openai",

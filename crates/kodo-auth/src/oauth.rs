@@ -15,7 +15,7 @@ use tokio::sync::{oneshot, Mutex};
 use tower_http::cors::CorsLayer;
 use url::Url;
 
-use crate::{AuthConfig, AuthProvider, AuthToken};
+use crate::{AuthConfig, AuthProvider, AuthToken, OAuthFlowType};
 
 /// OAuth authorization code response
 #[derive(Debug, Deserialize)]
@@ -43,6 +43,70 @@ struct OAuthError {
 struct CallbackState {
     sender: Option<oneshot::Sender<Result<String>>>,
     expected_state: String,
+}
+
+/// Holds the PKCE verifier and state for a pending code-paste OAuth flow.
+/// The TUI shows the URL to the user, they paste the code back,
+/// and then we call `exchange_code` with that code.
+pub struct PendingCodePaste {
+    /// The URL to open in the browser
+    pub auth_url: String,
+    /// PKCE code verifier (needed for token exchange)
+    verifier: String,
+    /// CSRF state parameter
+    _state: String,
+    /// The auth config (for token exchange)
+    config: AuthConfig,
+    /// HTTP client
+    http_client: reqwest::Client,
+}
+
+impl PendingCodePaste {
+    /// Exchange the user-pasted authorization code for a token.
+    pub async fn exchange_code(&self, code: &str) -> Result<AuthToken> {
+        let token_params = [
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("client_id", self.config.client_id.as_str()),
+            ("redirect_uri", self.config.redirect_uri.as_str()),
+            ("code_verifier", self.verifier.as_str()),
+        ];
+
+        let response = self
+            .http_client
+            .post(&self.config.token_url)
+            .form(&token_params)
+            .send()
+            .await
+            .context("Failed to exchange authorization code")?;
+
+        if !response.status().is_success() {
+            let error: OAuthError = response.json().await.unwrap_or(OAuthError {
+                error: "unknown".to_string(),
+                error_description: Some("Failed to parse error response".to_string()),
+            });
+            anyhow::bail!(
+                "OAuth token exchange failed: {} - {}",
+                error.error,
+                error.error_description.unwrap_or_default()
+            );
+        }
+
+        let token_response: TokenResponse = response.json().await?;
+
+        Ok(AuthToken {
+            provider: self.config.provider.clone(),
+            access_token: token_response.access_token,
+            refresh_token: token_response.refresh_token,
+            expires_at: token_response.expires_in.map(|exp| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64
+                    + exp
+            }),
+        })
+    }
 }
 
 /// OAuth2 authentication provider
@@ -80,19 +144,17 @@ impl OAuthProvider {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
         let mut rng = rand::thread_rng();
-        let mut state_bytes = [0u8; 16];
+        let mut state_bytes = [0u8; 32];
         rng.fill_bytes(&mut state_bytes);
         URL_SAFE_NO_PAD.encode(state_bytes)
     }
-}
 
-#[async_trait::async_trait]
-impl AuthProvider for OAuthProvider {
-    async fn login(&self) -> Result<AuthToken> {
+    /// Build the authorization URL with PKCE parameters.
+    /// Returns (url, verifier, state).
+    fn build_auth_url(&self) -> Result<(Url, String, String)> {
         let state = Self::generate_state();
         let (verifier, challenge) = Self::generate_pkce();
 
-        // Build authorization URL
         let mut auth_url = Url::parse(&self.config.auth_url)?;
         auth_url
             .query_pairs_mut()
@@ -103,58 +165,46 @@ impl AuthProvider for OAuthProvider {
             .append_pair("code_challenge", &challenge)
             .append_pair("code_challenge_method", "S256");
 
+        // For code-paste flows, add code=true to indicate the server
+        // should show the code to the user instead of redirecting
+        if self.config.flow_type == OAuthFlowType::CodePaste {
+            auth_url.query_pairs_mut().append_pair("code", "true");
+        }
+
         if !self.config.scopes.is_empty() {
             auth_url
                 .query_pairs_mut()
                 .append_pair("scope", &self.config.scopes.join(" "));
         }
 
-        // Create callback channel
-        let (tx, rx) = oneshot::channel();
-        let callback_state = Arc::new(Mutex::new(CallbackState {
-            sender: Some(tx),
-            expected_state: state.clone(),
-        }));
+        Ok((auth_url, verifier, state))
+    }
 
-        // Start local server for callback
-        // Support both /callback and /auth/callback paths for compatibility
-        let app = Router::new()
-            .route("/callback", get(handle_callback))
-            .route("/auth/callback", get(handle_callback))
-            .route("/success", get(handle_success))
-            .route("/error", get(handle_error))
-            .layer(CorsLayer::permissive())
-            .with_state(callback_state);
+    /// Start a code-paste OAuth flow.
+    ///
+    /// Returns a `PendingCodePaste` that contains the URL for the user
+    /// to open in their browser, and a method to exchange the code once
+    /// the user pastes it back.
+    pub fn start_code_paste_flow(&self) -> Result<PendingCodePaste> {
+        let (auth_url, verifier, state) = self.build_auth_url()?;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:8899")
-            .await
-            .context("Failed to bind OAuth callback server")?;
+        Ok(PendingCodePaste {
+            auth_url: auth_url.to_string(),
+            verifier,
+            _state: state,
+            config: self.config.clone(),
+            http_client: self.http_client.clone(),
+        })
+    }
 
-        // Spawn server in background
-        let server_handle = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        // Open browser
-        println!("Opening browser for authentication...");
-        webbrowser::open(auth_url.as_ref())?;
-
-        // Wait for callback with timeout
-        let code = tokio::time::timeout(Duration::from_secs(300), rx)
-            .await
-            .context("OAuth callback timeout")?
-            .context("OAuth callback channel closed")??;
-
-        // Shutdown server
-        server_handle.abort();
-
-        // Exchange code for token
+    /// Exchange code for token (shared logic)
+    async fn exchange_code(&self, code: &str, verifier: &str) -> Result<AuthToken> {
         let token_params = [
             ("grant_type", "authorization_code"),
-            ("code", &code),
-            ("client_id", &self.config.client_id),
-            ("redirect_uri", &self.config.redirect_uri),
-            ("code_verifier", &verifier),
+            ("code", code),
+            ("client_id", self.config.client_id.as_str()),
+            ("redirect_uri", self.config.redirect_uri.as_str()),
+            ("code_verifier", verifier),
         ];
 
         let response = self
@@ -166,7 +216,10 @@ impl AuthProvider for OAuthProvider {
             .context("Failed to exchange authorization code")?;
 
         if !response.status().is_success() {
-            let error: OAuthError = response.json().await?;
+            let error: OAuthError = response.json().await.unwrap_or(OAuthError {
+                error: "unknown".to_string(),
+                error_description: Some("Failed to parse error response".to_string()),
+            });
             anyhow::bail!(
                 "OAuth token exchange failed: {} - {}",
                 error.error,
@@ -190,6 +243,77 @@ impl AuthProvider for OAuthProvider {
         })
     }
 
+    /// Auto-redirect login: starts localhost callback server, opens browser,
+    /// waits for the redirect callback with the auth code.
+    async fn login_auto_redirect(&self) -> Result<AuthToken> {
+        let (auth_url, verifier, state) = self.build_auth_url()?;
+
+        // Create callback channel
+        let (tx, rx) = oneshot::channel();
+        let callback_state = Arc::new(Mutex::new(CallbackState {
+            sender: Some(tx),
+            expected_state: state,
+        }));
+
+        // Start local server for callback
+        let app = Router::new()
+            .route("/callback", get(handle_callback))
+            .route("/auth/callback", get(handle_callback))
+            .route("/success", get(handle_success))
+            .route("/error", get(handle_error))
+            .layer(CorsLayer::permissive())
+            .with_state(callback_state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:8899")
+            .await
+            .context("Failed to bind OAuth callback server")?;
+
+        let server_handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        // Open browser
+        webbrowser::open(auth_url.as_ref())?;
+
+        // Wait for callback with timeout
+        let code = tokio::time::timeout(Duration::from_secs(300), rx)
+            .await
+            .context("OAuth callback timeout")?
+            .context("OAuth callback channel closed")??;
+
+        server_handle.abort();
+
+        // Exchange code for token
+        self.exchange_code(&code, &verifier).await
+    }
+}
+
+#[async_trait::async_trait]
+impl AuthProvider for OAuthProvider {
+    async fn login(&self) -> Result<AuthToken> {
+        match self.config.flow_type {
+            OAuthFlowType::AutoRedirect => self.login_auto_redirect().await,
+            OAuthFlowType::CodePaste => {
+                // For CLI (non-TUI) usage: start code-paste flow,
+                // prompt user to paste code from stdin
+                let pending = self.start_code_paste_flow()?;
+                println!("Opening browser for authentication...");
+                println!("URL: {}", pending.auth_url);
+                webbrowser::open(&pending.auth_url)?;
+
+                println!();
+                println!("After authenticating, paste the authorization code below:");
+                let mut code = String::new();
+                std::io::stdin()
+                    .read_line(&mut code)
+                    .context("Failed to read authorization code")?;
+                let code = code.trim();
+
+                pending.exchange_code(code).await
+            }
+        }
+    }
+
     async fn refresh(&self, token: &AuthToken) -> Result<AuthToken> {
         let refresh_token = token
             .refresh_token
@@ -198,8 +322,8 @@ impl AuthProvider for OAuthProvider {
 
         let token_params = [
             ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-            ("client_id", &self.config.client_id),
+            ("refresh_token", refresh_token.as_str()),
+            ("client_id", self.config.client_id.as_str()),
         ];
 
         let response = self
@@ -238,7 +362,6 @@ impl AuthProvider for OAuthProvider {
     }
 
     async fn validate(&self, token: &AuthToken) -> Result<bool> {
-        // Check expiration if available
         if let Some(expires_at) = token.expires_at {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -250,20 +373,17 @@ impl AuthProvider for OAuthProvider {
             }
         }
 
-        // Provider-specific validation could be added here
-        // For now, assume token is valid if not expired
         Ok(true)
     }
 }
 
-// OAuth callback handlers
+// OAuth callback handlers (for auto-redirect flow)
 async fn handle_callback(
     Query(params): Query<AuthCallback>,
     State(state): State<Arc<Mutex<CallbackState>>>,
 ) -> Result<Redirect, Redirect> {
     let mut state_lock = state.lock().await;
 
-    // Verify state parameter
     if params.state.as_ref() != Some(&state_lock.expected_state) {
         if let Some(sender) = state_lock.sender.take() {
             let _ = sender.send(Err(anyhow::anyhow!("Invalid state parameter")));
@@ -271,7 +391,6 @@ async fn handle_callback(
         return Err(Redirect::to("/error"));
     }
 
-    // Send code to waiting task
     if let Some(sender) = state_lock.sender.take() {
         let _ = sender.send(Ok(params.code));
     }
@@ -292,7 +411,7 @@ async fn handle_success() -> Html<&'static str> {
             </style>
         </head>
         <body>
-            <div class="success">✓</div>
+            <div class="success">&#10003;</div>
             <h1>Authentication Successful!</h1>
             <p>You can close this window and return to Kodo.</p>
             <script>setTimeout(() => window.close(), 3000);</script>
@@ -315,7 +434,7 @@ async fn handle_error() -> Html<&'static str> {
             </style>
         </head>
         <body>
-            <div class="error">✗</div>
+            <div class="error">&#10007;</div>
             <h1>Authentication Failed</h1>
             <p>Please try again or check your credentials.</p>
             <script>setTimeout(() => window.close(), 3000);</script>

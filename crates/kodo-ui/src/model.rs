@@ -16,8 +16,10 @@ pub struct ProviderOption {
 /// How a provider can be authenticated.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuthMethod {
-    /// OAuth browser-based flow
+    /// OAuth auto-redirect flow (localhost callback server)
     OAuth,
+    /// OAuth code-paste flow (user pastes code from browser)
+    OAuthCodePaste,
     /// Manual API key entry
     ApiKey,
 }
@@ -41,8 +43,10 @@ pub enum ProviderModalState {
     SelectAuthMethod { provider: String },
     /// Waiting for API key input
     EnterApiKey { provider: String },
-    /// OAuth flow in progress (browser opened)
+    /// OAuth auto-redirect flow in progress (browser opened, waiting for callback)
     OAuthInProgress { provider: String },
+    /// OAuth code-paste flow: browser opened, waiting for user to paste the code
+    EnterOAuthCode { provider: String, auth_url: String },
     /// Auth succeeded, ready to pick model
     AuthSuccess { provider: String },
     /// Auth failed with an error message

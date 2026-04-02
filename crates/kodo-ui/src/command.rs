@@ -12,9 +12,16 @@ pub enum Command {
     /// The runtime will send this over the agent channel and listen for responses.
     SendToAgent(String),
 
-    /// Start OAuth flow for a provider.
+    /// Start OAuth auto-redirect flow for a provider.
     /// The runtime will launch the browser and start a callback server.
     StartOAuth { provider: String },
+
+    /// Start OAuth code-paste flow for a provider.
+    /// The runtime will generate the URL and send it back to the UI.
+    StartOAuthCodePaste { provider: String },
+
+    /// Exchange an OAuth authorization code (from code-paste flow) for a token.
+    ExchangeOAuthCode { provider: String, code: String },
 
     /// Store an API key for a provider and initialize it.
     /// The runtime will save the key and create the provider.
