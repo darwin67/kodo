@@ -106,6 +106,9 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Try to setup OAuth tokens as env vars
+    setup_oauth_tokens().await?;
+
     // Load configuration
     let config = load_or_default();
 
@@ -114,7 +117,24 @@ async fn main() -> Result<()> {
         .provider
         .as_deref()
         .unwrap_or(&config.general.default_provider);
-    let provider = create_provider_with_config(provider_name, &config)?;
+    let provider = match create_provider_with_config(provider_name, &config) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Error: Failed to initialize {} provider", provider_name);
+            eprintln!("");
+            eprintln!("To authenticate with {}, run:", provider_name);
+            eprintln!("  kodo --auth {}", provider_name);
+            eprintln!("");
+            eprintln!("Or set the environment variable:");
+            match provider_name {
+                "anthropic" => eprintln!("  export ANTHROPIC_API_KEY=your-api-key"),
+                "openai" => eprintln!("  export OPENAI_API_KEY=your-api-key"),
+                "gemini" => eprintln!("  export GEMINI_API_KEY=your-api-key"),
+                _ => {}
+            }
+            return Err(e);
+        }
+    };
     let model = cli.model.unwrap_or_else(|| {
         // Check provider-specific default model first
         config
@@ -284,6 +304,33 @@ fn map_agent_event(event: AgentEvent) -> Message {
         },
         AgentEvent::Done => Message::AgentDone,
     }
+}
+
+/// Try to setup OAuth tokens as environment variables if not already set
+async fn setup_oauth_tokens() -> Result<()> {
+    let storage = TokenStorage::new("kodo");
+
+    // Try Anthropic
+    if std::env::var("ANTHROPIC_API_KEY").is_err() {
+        if let Ok(Some(token)) = storage.get("anthropic").await {
+            unsafe {
+                std::env::set_var("ANTHROPIC_API_KEY", token.access_token);
+            }
+            tracing::debug!("Loaded Anthropic token from OAuth storage");
+        }
+    }
+
+    // Try OpenAI
+    if std::env::var("OPENAI_API_KEY").is_err() {
+        if let Ok(Some(token)) = storage.get("openai").await {
+            unsafe {
+                std::env::set_var("OPENAI_API_KEY", token.access_token);
+            }
+            tracing::debug!("Loaded OpenAI token from OAuth storage");
+        }
+    }
+
+    Ok(())
 }
 
 /// Handle OAuth authentication flow
