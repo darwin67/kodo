@@ -3,15 +3,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::{
+    Router,
     extract::{Query, State},
     response::{Html, Redirect},
     routing::get,
-    Router,
 };
 use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 use tower_http::cors::CorsLayer;
 use url::Url;
 
@@ -32,30 +32,45 @@ struct TokenResponse {
     expires_in: Option<i64>,
 }
 
-/// OAuth error response (generic)
+/// Standard OAuth error response (OpenAI style)
 #[derive(Debug, Deserialize)]
-struct OAuthError {
+struct StandardOAuthError {
     error: Option<String>,
     error_description: Option<String>,
-    // Anthropic uses a different error format
+}
+
+/// Anthropic-style nested error: {"error": {"type": "...", "message": "..."}}
+#[derive(Debug, Deserialize)]
+struct AnthropicErrorWrapper {
+    error: AnthropicErrorInner,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicErrorInner {
     #[serde(rename = "type")]
     error_type: Option<String>,
     message: Option<String>,
 }
 
-impl OAuthError {
-    fn display(&self) -> String {
-        let code = self
-            .error
-            .as_deref()
-            .or(self.error_type.as_deref())
-            .unwrap_or("unknown");
-        let desc = self
-            .error_description
-            .as_deref()
-            .or(self.message.as_deref())
-            .unwrap_or("");
-        format!("{} - {}", code, desc)
+/// Try to extract a human-readable error message from the response body.
+fn parse_oauth_error(body: &str) -> String {
+    // Try Anthropic nested format first: {"error": {"type": ..., "message": ...}}
+    if let Ok(err) = serde_json::from_str::<AnthropicErrorWrapper>(body) {
+        let error_type = err.error.error_type.as_deref().unwrap_or("error");
+        let message = err.error.message.as_deref().unwrap_or("");
+        return format!("{}: {}", error_type, message);
+    }
+    // Try standard OAuth format: {"error": "...", "error_description": "..."}
+    if let Ok(err) = serde_json::from_str::<StandardOAuthError>(body) {
+        let error = err.error.as_deref().unwrap_or("error");
+        let desc = err.error_description.as_deref().unwrap_or("");
+        return format!("{} - {}", error, desc);
+    }
+    // Fall back to raw body (truncated)
+    if body.len() > 200 {
+        format!("{}...", &body[..200])
+    } else {
+        body.to_string()
     }
 }
 
@@ -120,15 +135,11 @@ async fn send_token_request(
             body
         );
 
-        if let Ok(error) = serde_json::from_str::<OAuthError>(&body) {
-            anyhow::bail!(
-                "OAuth token request failed ({}): {}",
-                status,
-                error.display()
-            );
-        } else {
-            anyhow::bail!("OAuth token request failed ({}): {}", status, body);
-        }
+        anyhow::bail!(
+            "OAuth token request failed ({}): {}",
+            status,
+            parse_oauth_error(&body)
+        );
     }
 
     let body = response
@@ -207,7 +218,7 @@ impl OAuthProvider {
     /// Generate PKCE challenge.
     /// Returns (verifier, challenge) where verifier is a 43-char base64url string.
     fn generate_pkce() -> (String, String) {
-        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
         let mut rng = rand::thread_rng();
         let mut verifier_bytes = [0u8; 32];
@@ -223,7 +234,7 @@ impl OAuthProvider {
 
     /// Generate random state for CSRF protection
     fn generate_state() -> String {
-        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 
         let mut rng = rand::thread_rng();
         let mut state_bytes = [0u8; 32];
