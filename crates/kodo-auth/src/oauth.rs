@@ -32,6 +32,9 @@ struct TokenResponse {
     access_token: String,
     refresh_token: Option<String>,
     expires_in: Option<i64>,
+    /// OIDC id_token (used by OpenAI for token exchange to get API key)
+    #[serde(default)]
+    id_token: Option<String>,
 }
 
 /// Standard OAuth error response (OpenAI style)
@@ -153,6 +156,29 @@ async fn send_token_request(
     let token_response: TokenResponse =
         serde_json::from_str(&body).context(format!("Failed to parse token response: {}", body))?;
 
+    // For OpenAI: exchange the id_token for an API key via RFC 8693 token exchange.
+    // The OAuth access_token alone doesn't have API permissions; we need an actual API key.
+    if config.provider == "openai" {
+        if let Some(id_token) = &token_response.id_token {
+            tracing::debug!("OpenAI: exchanging id_token for API key via token exchange");
+            let api_key = obtain_openai_api_key(client, config, id_token).await?;
+            return Ok(AuthToken {
+                provider: config.provider.clone(),
+                access_token: api_key,
+                refresh_token: token_response.refresh_token,
+                expires_at: token_response.expires_in.map(|exp| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64
+                        + exp
+                }),
+            });
+        } else {
+            tracing::warn!("OpenAI: no id_token in response, using access_token directly");
+        }
+    }
+
     Ok(AuthToken {
         provider: config.provider.clone(),
         access_token: token_response.access_token,
@@ -165,6 +191,65 @@ async fn send_token_request(
                 + exp
         }),
     })
+}
+
+/// Exchange an OIDC id_token for an OpenAI API key via RFC 8693 Token Exchange.
+/// This is what the Codex CLI does to obtain a key with full API permissions
+/// (including api.responses.write) from the OAuth login flow.
+async fn obtain_openai_api_key(
+    client: &reqwest::Client,
+    config: &AuthConfig,
+    id_token: &str,
+) -> Result<String> {
+    let body = format!(
+        "grant_type={}&client_id={}&requested_token={}&subject_token={}&subject_token_type={}",
+        urlencoding::encode("urn:ietf:params:oauth:grant-type:token-exchange"),
+        urlencoding::encode(&config.client_id),
+        urlencoding::encode("openai-api-key"),
+        urlencoding::encode(id_token),
+        urlencoding::encode("urn:ietf:params:oauth:token-type:id_token"),
+    );
+
+    tracing::debug!("OpenAI token exchange: url={}", config.token_url);
+
+    let response = client
+        .post(&config.token_url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .context("Failed to send OpenAI token exchange request")?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "(failed to read response body)".to_string());
+        tracing::error!(
+            "OpenAI token exchange failed: status={}, body={}",
+            status,
+            body
+        );
+        anyhow::bail!(
+            "OpenAI token exchange failed ({}): {}",
+            status,
+            parse_oauth_error(&body)
+        );
+    }
+
+    let resp_body = response
+        .text()
+        .await
+        .context("Failed to read token exchange response")?;
+    tracing::debug!("OpenAI token exchange response received");
+
+    let token_resp: TokenResponse = serde_json::from_str(&resp_body).context(format!(
+        "Failed to parse token exchange response: {}",
+        resp_body
+    ))?;
+
+    Ok(token_resp.access_token)
 }
 
 /// Holds the PKCE verifier and state for a pending code-paste OAuth flow.

@@ -115,6 +115,8 @@ impl AuthConfig {
                 "profile".to_string(),
                 "email".to_string(),
                 "offline_access".to_string(),
+                "api.connectors.read".to_string(),
+                "api.connectors.invoke".to_string(),
             ],
             audience: None,
             flow_type: OAuthFlowType::AutoRedirect,
