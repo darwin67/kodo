@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+kodo-config = { workspace = true }
 kodo-llm = { workspace = true }
 kodo-tools = { workspace = true }
 kodo-fmt = { workspace = true }
@@ -19,6 +20,8 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 regex = { workspace = true }
+uuid = { workspace = true }
+scopeguard = "1"
 
 [dev-dependencies]
 tempfile = "3"

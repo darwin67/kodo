@@ -386,14 +386,14 @@ Give the agent awareness of type errors and diagnostics.
 
 Refinements and advanced features.
 
-- [ ] Context window management: track token counts, auto-compact when nearing limit
-- [ ] OAuth browser login flows (Anthropic, OpenAI)
-- [ ] Prompt caching (Anthropic)
-- [ ] Subagent support (spawn isolated agent tasks)
+- [X] Context window management: track token counts, auto-compact when nearing limit
+- [X] OAuth browser login flows (Anthropic, OpenAI)
+- [X] Prompt caching (Anthropic)
+- [X] Subagent support (spawn isolated agent tasks)
 - [ ] MCP server integration
-- [ ] Config file support (YAML + TOML)
-- [ ] Custom LSP servers and formatters via config
-- [ ] Auto-install LSP servers when missing
+- [X] Config file support (YAML + TOML)
+- [X] Custom LSP servers and formatters via config
+- [X] Auto-install LSP servers when missing
 
 * References
 

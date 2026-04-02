@@ -3,7 +3,7 @@
 /// and executed by the runtime loop. They describe WHAT to do, not HOW.
 ///
 /// The update() function is pure - it only modifies the model and returns
-/// Commands. The runtime loop executes Commands and feeds results back
+/// Commands. The runtime will execute Commands and feed results back
 /// as new Messages. This separation makes the core logic testable and
 /// allows the same update logic to work with different runtimes (TUI, GUI).
 #[derive(Debug, Clone)]
@@ -11,6 +11,33 @@ pub enum Command {
     /// Send a user message to the agent for processing.
     /// The runtime will send this over the agent channel and listen for responses.
     SendToAgent(String),
+
+    /// Start OAuth auto-redirect flow for a provider.
+    /// The runtime will launch the browser and start a callback server.
+    StartOAuth { provider: String },
+
+    /// Start OAuth code-paste flow for a provider.
+    /// The runtime will generate the URL and send it back to the UI.
+    StartOAuthCodePaste { provider: String },
+
+    /// Exchange an OAuth authorization code (from code-paste flow) for a token.
+    ExchangeOAuthCode { provider: String, code: String },
+
+    /// Fetch available models for a provider.
+    /// The runtime will query the provider API and send back the results.
+    FetchModels { provider: String },
+
+    /// Store an API key for a provider and initialize it.
+    /// The runtime will save the key and create the provider.
+    StoreApiKey { provider: String, api_key: String },
+
+    /// Switch the active provider and model.
+    /// The runtime will recreate the agent with the new provider.
+    SwitchProvider {
+        provider: String,
+        model: String,
+        api_key: String,
+    },
 
     /// Request the application to exit gracefully.
     /// The runtime will perform cleanup and terminate the event loop.

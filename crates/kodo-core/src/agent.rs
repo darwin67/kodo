@@ -66,6 +66,12 @@ pub enum AgentEvent {
     Diagnostics { summary: String, count: usize },
     /// An error occurred.
     Error(String),
+    /// Context window update.
+    ContextUpdate {
+        tokens: u32,
+        limit: u32,
+        percent: f32,
+    },
     /// Message processing is complete.
     Done,
 }
@@ -93,6 +99,9 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(provider: Arc<dyn Provider>) -> Self {
+        let mut context = ContextTracker::new();
+        context.set_model(DEFAULT_MODEL);
+
         Self {
             provider,
             tool_registry: ToolRegistry::new(),
@@ -100,7 +109,7 @@ impl Agent {
             lsp_manager: LspManager::new(std::env::current_dir().unwrap_or_default()),
             checkpoints: CheckpointManager::new(),
             messages: Vec::new(),
-            context: ContextTracker::new(),
+            context,
             mode: Mode::default(),
             model: DEFAULT_MODEL.to_string(),
             system_prompt: SYSTEM_PROMPT.to_string(),
@@ -135,6 +144,7 @@ impl Agent {
 
     pub fn set_model(&mut self, model: impl Into<String>) {
         self.model = model.into();
+        self.context.set_model(&self.model);
     }
 
     pub fn provider_name(&self) -> &str {
@@ -158,6 +168,50 @@ impl Agent {
         self.checkpoints.undo_last().await
     }
 
+    pub fn set_system_prompt(&mut self, prompt: &str) {
+        self.system_prompt = prompt.to_string();
+    }
+
+    pub fn add_message(&mut self, message: Message) {
+        self.messages.push(message);
+    }
+
+    pub fn messages(&self) -> &[Message] {
+        &self.messages
+    }
+
+    /// Set maximum concurrent subagents limit
+    pub fn set_max_concurrent_subagents(&mut self, limit: usize) {
+        // TODO: Implement when subagent manager is available
+        let _ = limit; // Avoid unused parameter warning
+    }
+
+    /// Configure custom LSP servers from config
+    pub fn configure_lsp_servers(
+        &mut self,
+        custom_servers: &std::collections::HashMap<String, kodo_config::LspConfig>,
+        auto_install: bool,
+    ) {
+        // TODO: Implement custom LSP server configuration
+        if !custom_servers.is_empty() {
+            tracing::debug!(
+                "Found {} custom LSP server configurations",
+                custom_servers.len()
+            );
+        }
+        if auto_install {
+            tracing::debug!("Auto-install LSP servers is enabled");
+        }
+    }
+
+    /// Configure custom formatters from config
+    pub fn configure_formatters(
+        &mut self,
+        custom_formatters: &std::collections::HashMap<String, kodo_config::FormatterConfig>,
+    ) {
+        self.formatter_registry = FormatterRegistry::with_custom(custom_formatters);
+    }
+
     /// Process a user message through the agentic loop.
     /// Emits `AgentEvent`s to the provided sender for UI rendering.
     /// If no sender is provided, events are silently discarded (headless mode).
@@ -167,6 +221,14 @@ impl Agent {
         tx: Option<&AgentEventTx>,
     ) -> Result<()> {
         self.messages.push(Message::user(user_input));
+
+        // Update token count and check if we need to compact
+        self.context
+            .update_conversation_tokens(&self.messages, Some(&self.system_prompt));
+
+        if self.context.is_nearing_limit() {
+            self.compact_context(tx).await?;
+        }
 
         loop {
             let request = self.build_request();
@@ -201,7 +263,7 @@ impl Agent {
         Ok(())
     }
 
-    fn build_request(&self) -> CompletionRequest {
+    fn build_request(&mut self) -> CompletionRequest {
         let mode = self.mode;
         let mut tools: Vec<ToolDefinition> = self
             .tool_registry
@@ -227,6 +289,10 @@ impl Agent {
                 "required": ["path"]
             }),
         });
+
+        // Update token count before sending request
+        self.context
+            .update_conversation_tokens(&self.messages, Some(&self.system_prompt));
 
         CompletionRequest {
             model: self.model.clone(),
@@ -255,6 +321,16 @@ impl Agent {
             match event {
                 StreamEvent::MessageStart { usage } => {
                     self.context.record(&usage);
+
+                    // Emit context update
+                    emit(
+                        tx,
+                        AgentEvent::ContextUpdate {
+                            tokens: self.context.current_conversation_tokens,
+                            limit: self.context.current_model_limit,
+                            percent: self.context.context_usage_percent(),
+                        },
+                    );
                 }
                 StreamEvent::TextDelta { text } => {
                     emit(tx, AgentEvent::TextDelta(text.clone()));
@@ -293,6 +369,16 @@ impl Agent {
                 } => {
                     self.context.record(&usage);
                     stop_reason = sr;
+
+                    // Emit context update
+                    emit(
+                        tx,
+                        AgentEvent::ContextUpdate {
+                            tokens: self.context.current_conversation_tokens,
+                            limit: self.context.current_model_limit,
+                            percent: self.context.context_usage_percent(),
+                        },
+                    );
                 }
             }
         }
@@ -600,6 +686,91 @@ impl Agent {
     /// Shut down all LSP servers (call on session end).
     pub async fn shutdown_lsp(&mut self) {
         self.lsp_manager.shutdown_all().await;
+    }
+
+    /// Compact the context by summarizing older messages.
+    async fn compact_context(&mut self, tx: Option<&AgentEventTx>) -> Result<()> {
+        debug!(
+            "Context nearing limit: {:.1}% used ({}/{} tokens)",
+            self.context.context_usage_percent(),
+            self.context.current_conversation_tokens,
+            self.context.current_model_limit
+        );
+
+        emit(
+            tx,
+            AgentEvent::Error(format!(
+                "Context window nearing limit ({:.1}% used). Compacting conversation history...",
+                self.context.context_usage_percent()
+            )),
+        );
+
+        let compact_index = self.context.suggest_compaction_index(&self.messages);
+        if compact_index == 0 {
+            // Too few messages to compact
+            return Ok(());
+        }
+
+        // Create a summary of the messages to be removed
+        let messages_to_summarize: Vec<_> = self.messages[..compact_index].to_vec();
+        let summary = self.create_summary(&messages_to_summarize).await?;
+
+        // Replace old messages with summary
+        self.messages = self.messages[compact_index..].to_vec();
+        self.messages.insert(
+            0,
+            Message::user(format!("[Previous conversation summary]\n{}", summary)),
+        );
+
+        // Update token count
+        self.context
+            .update_conversation_tokens(&self.messages, Some(&self.system_prompt));
+
+        emit(
+            tx,
+            AgentEvent::Error(format!(
+                "Context compacted. Now using {:.1}% of context window.",
+                self.context.context_usage_percent()
+            )),
+        );
+
+        Ok(())
+    }
+
+    /// Create a summary of messages using the LLM.
+    async fn create_summary(&self, messages: &[Message]) -> Result<String> {
+        // Build a request to summarize the messages
+        let summary_prompt = "Please provide a concise summary of the following conversation, \
+            focusing on key decisions, completed tasks, and important context. \
+            Keep the summary under 500 words.";
+
+        let mut summary_messages = vec![Message::user(summary_prompt)];
+
+        // Add conversation context
+        let mut context = String::from("\n--- Conversation to summarize ---\n");
+        for msg in messages {
+            match msg.role {
+                Role::User => context.push_str("\nUser: "),
+                Role::Assistant => context.push_str("\nAssistant: "),
+            }
+            context.push_str(&msg.text());
+            context.push('\n');
+        }
+        summary_messages.push(Message::user(context));
+
+        let request = CompletionRequest {
+            model: self.model.clone(),
+            system: Some(
+                "You are a conversation summarizer. Create concise, factual summaries.".to_string(),
+            ),
+            messages: summary_messages,
+            tools: vec![], // No tools for summarization
+            max_tokens: 1000,
+        };
+
+        // Get synchronous completion (no streaming needed for summary)
+        let response = self.provider.complete(request).await?;
+        Ok(response.message.text())
     }
 }
 

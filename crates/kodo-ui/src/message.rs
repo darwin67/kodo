@@ -2,7 +2,7 @@
 /// Following the Elm Architecture pattern, Messages are the ONLY way
 /// to modify the application state. They describe what happened, not
 /// how to handle it (that's the job of update()).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Message {
     // -- Input events --
     /// User typed a character in the input field
@@ -81,8 +81,67 @@ pub enum Message {
     AgentDiagnostics { summary: String, count: usize },
     /// Agent encountered an error
     AgentError(String),
+    /// Context window update
+    ContextUpdate {
+        tokens: u32,
+        limit: u32,
+        percent: f32,
+    },
     /// Agent finished processing (no more streaming or tools)
     AgentDone,
+
+    // -- Provider connect modal --
+    /// Open the provider connect modal
+    OpenProviderModal,
+    /// Close the provider connect modal
+    CloseProviderModal,
+    /// Move selection up in provider modal
+    ProviderModalUp,
+    /// Move selection down in provider modal
+    ProviderModalDown,
+    /// Select the current item in provider modal (enter)
+    ProviderModalSelect,
+    /// User typed a character in a text input (API key or OAuth code)
+    ProviderModalApiKeyInput(char),
+    /// User pressed backspace in a text input (API key or OAuth code)
+    ProviderModalApiKeyBackspace,
+    /// User submitted their API key
+    ProviderModalApiKeySubmit,
+    /// User submitted the OAuth authorization code (code-paste flow)
+    ProviderModalOAuthCodeSubmit,
+    /// OAuth code-paste flow started: URL ready for user to open
+    OAuthCodePasteReady { provider: String, auth_url: String },
+    /// OAuth flow completed successfully
+    OAuthComplete { provider: String, token: String },
+    /// OAuth flow failed
+    OAuthError { provider: String, error: String },
+    /// Go back to the previous screen in provider modal
+    ProviderModalBack,
+
+    // -- Model selection modal --
+    /// Open the model selection modal
+    OpenModelModal,
+    /// Close the model selection modal
+    CloseModelModal,
+    /// Move selection up in model modal
+    ModelModalUp,
+    /// Move selection down in model modal
+    ModelModalDown,
+    /// Select the current model
+    ModelModalSelect,
+    /// Models fetched from provider API
+    ModelsFetched {
+        provider: String,
+        models: Vec<(String, String)>, // (id, display_name)
+    },
+
+    // -- Provider switching --
+    /// Switch to a different provider and model at runtime
+    SwitchProvider {
+        provider: String,
+        model: String,
+        api_key: String,
+    },
 
     // -- System --
     /// Periodic tick for animations/updates

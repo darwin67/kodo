@@ -25,11 +25,33 @@ struct ApiRequest {
     model: String,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<ApiSystemPrompt>,
     messages: Vec<ApiMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ApiTool>,
     stream: bool,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(untagged)]
+enum ApiSystemPrompt {
+    #[allow(dead_code)]
+    Simple(String),
+    WithCache(ApiSystemPromptWithCache),
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+struct ApiSystemPromptWithCache {
+    #[serde(rename = "type")]
+    prompt_type: String,
+    text: String,
+    cache_control: CacheControl,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    cache_type: String,
 }
 
 #[derive(Serialize)]
@@ -43,6 +65,8 @@ struct ApiMessage {
 enum ApiContentBlock {
     Text {
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     ToolUse {
         id: String,
@@ -77,6 +101,10 @@ struct ApiUsage {
     input_tokens: u32,
     #[serde(default)]
     output_tokens: u32,
+    #[serde(default)]
+    cache_creation_input_tokens: u32,
+    #[serde(default)]
+    cache_read_input_tokens: u32,
 }
 
 #[derive(Deserialize, Debug)]
@@ -148,19 +176,43 @@ struct SseMessageDeltaPayload {
 fn to_api_messages(messages: &[Message]) -> Vec<ApiMessage> {
     messages
         .iter()
-        .map(|m| ApiMessage {
-            role: match m.role {
-                Role::User => "user".into(),
-                Role::Assistant => "assistant".into(),
-            },
-            content: m.content.iter().map(to_api_content_block).collect(),
+        .enumerate()
+        .map(|(idx, m)| {
+            // Cache the first few messages for better performance
+            let should_cache = idx < 3 && messages.len() > 5;
+
+            ApiMessage {
+                role: match m.role {
+                    Role::User => "user".into(),
+                    Role::Assistant => "assistant".into(),
+                },
+                content: m
+                    .content
+                    .iter()
+                    .map(|block| to_api_content_block_with_cache(block, should_cache))
+                    .collect(),
+            }
         })
         .collect()
 }
 
+#[allow(dead_code)]
 fn to_api_content_block(block: &ContentBlock) -> ApiContentBlock {
+    to_api_content_block_with_cache(block, false)
+}
+
+fn to_api_content_block_with_cache(block: &ContentBlock, enable_cache: bool) -> ApiContentBlock {
     match block {
-        ContentBlock::Text { text } => ApiContentBlock::Text { text: text.clone() },
+        ContentBlock::Text { text } => ApiContentBlock::Text {
+            text: text.clone(),
+            cache_control: if enable_cache {
+                Some(CacheControl {
+                    cache_type: "ephemeral".to_string(),
+                })
+            } else {
+                None
+            },
+        },
         ContentBlock::ToolUse { id, name, input } => ApiContentBlock::ToolUse {
             id: id.clone(),
             name: name.clone(),
@@ -191,7 +243,10 @@ fn to_api_tools(tools: &[ToolDefinition]) -> Vec<ApiTool> {
 
 fn from_api_content_block(block: &ApiContentBlock) -> ContentBlock {
     match block {
-        ApiContentBlock::Text { text } => ContentBlock::text(text),
+        ApiContentBlock::Text {
+            text,
+            cache_control: _,
+        } => ContentBlock::text(text),
         ApiContentBlock::ToolUse { id, name, input } => {
             ContentBlock::tool_use(id, name, input.clone())
         }
@@ -242,10 +297,22 @@ impl AnthropicProvider {
     }
 
     fn build_api_request(&self, request: &CompletionRequest, stream: bool) -> ApiRequest {
+        // Convert system prompt to API format with caching if enabled
+        let system = request.system.as_ref().map(|s| {
+            // Enable caching for system prompts to reduce costs
+            ApiSystemPrompt::WithCache(ApiSystemPromptWithCache {
+                prompt_type: "text".to_string(),
+                text: s.clone(),
+                cache_control: CacheControl {
+                    cache_type: "ephemeral".to_string(),
+                },
+            })
+        });
+
         ApiRequest {
             model: request.model.clone(),
             max_tokens: request.max_tokens,
-            system: request.system.clone(),
+            system,
             messages: to_api_messages(&request.messages),
             tools: to_api_tools(&request.tools),
             stream,
@@ -263,6 +330,7 @@ impl Provider for AnthropicProvider {
             .post(format!("{API_BASE}/v1/messages"))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", API_VERSION)
+            .header("anthropic-beta", "prompt-caching-2024-07-31")
             .header("content-type", "application/json")
             .json(&api_req)
             .send()
@@ -283,6 +351,20 @@ impl Provider for AnthropicProvider {
 
         let api_resp: ApiResponse =
             serde_json::from_str(&body).context("failed to parse Anthropic API response")?;
+
+        // Log cache usage if any
+        if api_resp.usage.cache_read_input_tokens > 0 {
+            debug!(
+                "Prompt cache hit: {} tokens read from cache (saved {} tokens)",
+                api_resp.usage.cache_read_input_tokens, api_resp.usage.cache_read_input_tokens
+            );
+        }
+        if api_resp.usage.cache_creation_input_tokens > 0 {
+            debug!(
+                "Created prompt cache: {} tokens cached",
+                api_resp.usage.cache_creation_input_tokens
+            );
+        }
 
         let content: Vec<ContentBlock> = api_resp
             .content
@@ -314,6 +396,7 @@ impl Provider for AnthropicProvider {
             .post(format!("{API_BASE}/v1/messages"))
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", API_VERSION)
+            .header("anthropic-beta", "prompt-caching-2024-07-31")
             .header("content-type", "application/json")
             .json(&api_req)
             .send()
@@ -456,11 +539,15 @@ impl Provider for AnthropicProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        // Hardcoded for now; could query API later.
         Ok(vec![
             ModelInfo {
                 id: "claude-sonnet-4-20250514".into(),
                 name: "Claude Sonnet 4".into(),
+                context_window: 200_000,
+            },
+            ModelInfo {
+                id: "claude-opus-4-20250514".into(),
+                name: "Claude Opus 4".into(),
                 context_window: 200_000,
             },
             ModelInfo {
@@ -645,7 +732,10 @@ mod tests {
         assert_eq!(api_req.model, "claude-sonnet-4-20250514");
         assert_eq!(api_req.max_tokens, 1024);
         assert!(!api_req.stream);
-        assert_eq!(api_req.system, Some("You are helpful.".into()));
+        assert!(matches!(
+            api_req.system,
+            Some(ApiSystemPrompt::WithCache(ref cache)) if cache.text == "You are helpful."
+        ));
         assert_eq!(api_req.messages.len(), 1);
         assert!(api_req.tools.is_empty());
     }
@@ -748,7 +838,10 @@ mod tests {
             } => {
                 assert_eq!(index, 0);
                 match content_block {
-                    ApiContentBlock::Text { text } => assert_eq!(text, ""),
+                    ApiContentBlock::Text {
+                        text,
+                        cache_control: _,
+                    } => assert_eq!(text, ""),
                     _ => panic!("expected Text block"),
                 }
             }
