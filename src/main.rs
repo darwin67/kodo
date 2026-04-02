@@ -143,12 +143,17 @@ async fn build_provider_options() -> Vec<ProviderOption> {
 
     let openai_config = AuthConfig::openai();
 
+    let anthropic_config = AuthConfig::anthropic();
+
     vec![
         ProviderOption {
             id: "anthropic".to_string(),
             display_name: "Anthropic (Claude)".to_string(),
-            // Anthropic has no public OAuth; API key only
-            auth_methods: vec![AuthMethod::ApiKey],
+            auth_methods: if anthropic_config.supports_oauth() {
+                vec![AuthMethod::OAuthCodePaste, AuthMethod::ApiKey]
+            } else {
+                vec![AuthMethod::ApiKey]
+            },
             is_authenticated: anthropic_authed,
         },
         ProviderOption {
@@ -898,30 +903,25 @@ async fn setup_oauth_tokens() -> Result<()> {
 
 /// Handle --auth CLI flag (non-TUI OAuth flow)
 async fn handle_auth(provider_name: &str) -> Result<()> {
-    match provider_name {
-        "anthropic" => {
-            println!("Anthropic uses API key authentication.");
-            println!("Get your key at: https://console.anthropic.com/settings/keys");
-            println!();
-            println!("Then either:");
-            println!("  export ANTHROPIC_API_KEY=your-api-key");
-            println!("  # or run kodo and enter it in the provider connect dialog");
-            return Ok(());
-        }
-        "openai" => {
-            let config = AuthConfig::openai();
-            println!("Starting authentication for OpenAI...");
-            let oauth = OAuthProvider::new(config);
-            let token = oauth.login().await?;
-            let storage = TokenStorage::new("kodo");
-            storage.store(&token).await?;
-            println!("Authentication successful! Token has been securely stored.");
-            println!("You can now run kodo and it will use the stored credentials.");
-        }
+    let config = match provider_name {
+        "anthropic" => AuthConfig::anthropic(),
+        "openai" => AuthConfig::openai(),
         _ => bail!(
             "Unsupported auth provider: {}. Available: anthropic, openai",
             provider_name
         ),
-    }
+    };
+
+    println!("Starting authentication for {}...", provider_name);
+
+    let oauth = OAuthProvider::new(config);
+    let token = oauth.login().await?;
+
+    // Store token securely
+    let storage = TokenStorage::new("kodo");
+    storage.store(&token).await?;
+
+    println!("Authentication successful! Token has been securely stored.");
+    println!("You can now run kodo and it will use the stored credentials.");
     Ok(())
 }

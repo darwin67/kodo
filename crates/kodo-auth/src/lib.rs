@@ -30,6 +30,15 @@ pub enum OAuthFlowType {
     CodePaste,
 }
 
+/// Content type for the token exchange request
+#[derive(Debug, Clone, PartialEq)]
+pub enum TokenRequestFormat {
+    /// application/x-www-form-urlencoded (default, used by OpenAI)
+    FormEncoded,
+    /// application/json (used by Anthropic)
+    Json,
+}
+
 /// Authentication configuration for a provider
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
@@ -47,26 +56,40 @@ pub struct AuthConfig {
     pub scopes: Vec<String>,
     /// The type of OAuth callback flow
     pub flow_type: OAuthFlowType,
+    /// Content type for token exchange requests
+    pub token_request_format: TokenRequestFormat,
+    /// Whether state should equal the code_verifier (Anthropic requires this)
+    pub state_equals_verifier: bool,
 }
 
 impl AuthConfig {
-    /// Create config for Anthropic.
+    /// Create config for Anthropic OAuth (Claude Code flow).
     ///
-    /// Anthropic does not have a documented public OAuth token exchange
-    /// endpoint for third-party tools. Authentication is done via API
-    /// keys from console.anthropic.com / platform.claude.com.
+    /// Uses claude.ai OAuth with PKCE (code-paste flow).
+    /// The user authenticates in the browser, gets an authorization code
+    /// displayed, and pastes it back into kodo. The code is exchanged
+    /// for an OAuth access token at the Anthropic token endpoint.
     ///
-    /// OAuth fields are left empty so `supports_oauth()` returns false
-    /// and the TUI only shows the API key entry option.
+    /// Per the Claude Code OAuth spec:
+    /// - Token endpoint requires JSON body + `User-Agent: anthropic` header
+    /// - State parameter must equal the PKCE code_verifier
+    /// - The access token is used as the `x-api-key` for API calls
     pub fn anthropic() -> Self {
         Self {
             provider: "anthropic".to_string(),
-            client_id: String::new(),
-            auth_url: String::new(),
-            token_url: String::new(),
-            redirect_uri: String::new(),
-            scopes: vec![],
+            client_id: std::env::var("ANTHROPIC_CLIENT_ID")
+                .unwrap_or_else(|_| "9d1c250a-e61b-44d9-88ed-5944d1962f5e".to_string()),
+            auth_url: "https://claude.ai/oauth/authorize".to_string(),
+            token_url: "https://console.anthropic.com/v1/oauth/token".to_string(),
+            redirect_uri: "https://console.anthropic.com/oauth/code/callback".to_string(),
+            scopes: vec![
+                "org:create_api_key".to_string(),
+                "user:profile".to_string(),
+                "user:inference".to_string(),
+            ],
             flow_type: OAuthFlowType::CodePaste,
+            token_request_format: TokenRequestFormat::Json,
+            state_equals_verifier: true,
         }
     }
 
@@ -91,6 +114,8 @@ impl AuthConfig {
                 "offline_access".to_string(),
             ],
             flow_type: OAuthFlowType::AutoRedirect,
+            token_request_format: TokenRequestFormat::FormEncoded,
+            state_equals_verifier: false,
         }
     }
 

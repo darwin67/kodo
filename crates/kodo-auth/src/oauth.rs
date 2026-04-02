@@ -15,7 +15,7 @@ use tokio::sync::{oneshot, Mutex};
 use tower_http::cors::CorsLayer;
 use url::Url;
 
-use crate::{AuthConfig, AuthProvider, AuthToken, OAuthFlowType};
+use crate::{AuthConfig, AuthProvider, AuthToken, OAuthFlowType, TokenRequestFormat};
 
 /// OAuth authorization code response
 #[derive(Debug, Deserialize)]
@@ -32,17 +32,126 @@ struct TokenResponse {
     expires_in: Option<i64>,
 }
 
-/// OAuth error response
+/// OAuth error response (generic)
 #[derive(Debug, Deserialize)]
 struct OAuthError {
-    error: String,
+    error: Option<String>,
     error_description: Option<String>,
+    // Anthropic uses a different error format
+    #[serde(rename = "type")]
+    error_type: Option<String>,
+    message: Option<String>,
+}
+
+impl OAuthError {
+    fn display(&self) -> String {
+        let code = self
+            .error
+            .as_deref()
+            .or(self.error_type.as_deref())
+            .unwrap_or("unknown");
+        let desc = self
+            .error_description
+            .as_deref()
+            .or(self.message.as_deref())
+            .unwrap_or("");
+        format!("{} - {}", code, desc)
+    }
 }
 
 /// Shared state for OAuth callback
 struct CallbackState {
     sender: Option<oneshot::Sender<Result<String>>>,
     expected_state: String,
+}
+
+/// Send a token request with the correct format (JSON or form-encoded)
+/// and required headers based on the provider config.
+async fn send_token_request(
+    client: &reqwest::Client,
+    config: &AuthConfig,
+    params: &serde_json::Value,
+) -> Result<AuthToken> {
+    tracing::debug!(
+        "Token request: url={}, format={:?}, params={}",
+        config.token_url,
+        config.token_request_format,
+        params
+    );
+
+    let mut req = client.post(&config.token_url);
+
+    // Anthropic requires User-Agent: anthropic
+    if config.provider == "anthropic" {
+        req = req.header("User-Agent", "anthropic");
+    }
+
+    // Send as JSON or form-encoded based on config
+    req = match config.token_request_format {
+        TokenRequestFormat::Json => req
+            .header("Content-Type", "application/json")
+            .body(params.to_string()),
+        TokenRequestFormat::FormEncoded => {
+            // Convert JSON object to form params
+            let form_params: Vec<(String, String)> = params
+                .as_object()
+                .map(|obj| {
+                    obj.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            req.form(&form_params)
+        }
+    };
+
+    let response = req.send().await.context("Failed to send token request")?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "(failed to read response body)".to_string());
+        tracing::error!(
+            "Token request failed: status={}, url={}, body={}",
+            status,
+            config.token_url,
+            body
+        );
+
+        if let Ok(error) = serde_json::from_str::<OAuthError>(&body) {
+            anyhow::bail!(
+                "OAuth token request failed ({}): {}",
+                status,
+                error.display()
+            );
+        } else {
+            anyhow::bail!("OAuth token request failed ({}): {}", status, body);
+        }
+    }
+
+    let body = response
+        .text()
+        .await
+        .context("Failed to read token response body")?;
+    tracing::debug!("Token response: {}", body);
+
+    let token_response: TokenResponse =
+        serde_json::from_str(&body).context(format!("Failed to parse token response: {}", body))?;
+
+    Ok(AuthToken {
+        provider: config.provider.clone(),
+        access_token: token_response.access_token,
+        refresh_token: token_response.refresh_token,
+        expires_at: token_response.expires_in.map(|exp| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+                + exp
+        }),
+    })
 }
 
 /// Holds the PKCE verifier and state for a pending code-paste OAuth flow.
@@ -53,8 +162,8 @@ pub struct PendingCodePaste {
     pub auth_url: String,
     /// PKCE code verifier (needed for token exchange)
     verifier: String,
-    /// CSRF state parameter
-    _state: String,
+    /// State parameter (may equal verifier for Anthropic)
+    state: String,
     /// The auth config (for token exchange)
     config: AuthConfig,
     /// HTTP client
@@ -64,69 +173,20 @@ pub struct PendingCodePaste {
 impl PendingCodePaste {
     /// Exchange the user-pasted authorization code for a token.
     pub async fn exchange_code(&self, code: &str) -> Result<AuthToken> {
-        let token_params = [
-            ("grant_type", "authorization_code"),
-            ("code", code),
-            ("client_id", self.config.client_id.as_str()),
-            ("redirect_uri", self.config.redirect_uri.as_str()),
-            ("code_verifier", self.verifier.as_str()),
-        ];
+        let mut params = serde_json::json!({
+            "grant_type": "authorization_code",
+            "code": code,
+            "client_id": self.config.client_id,
+            "redirect_uri": self.config.redirect_uri,
+            "code_verifier": self.verifier,
+        });
 
-        let response = self
-            .http_client
-            .post(&self.config.token_url)
-            .form(&token_params)
-            .send()
-            .await
-            .context("Failed to exchange authorization code")?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "(failed to read response body)".to_string());
-            tracing::error!(
-                "Token exchange failed: status={}, url={}, body={}",
-                status,
-                self.config.token_url,
-                body
-            );
-
-            // Try to parse as structured error, fall back to raw body
-            if let Ok(error) = serde_json::from_str::<OAuthError>(&body) {
-                anyhow::bail!(
-                    "OAuth token exchange failed ({}): {} - {}",
-                    status,
-                    error.error,
-                    error.error_description.unwrap_or_default()
-                );
-            } else {
-                anyhow::bail!("OAuth token exchange failed ({}): {}", status, body);
-            }
+        // Include state if the flow requires it
+        if self.config.state_equals_verifier {
+            params["state"] = serde_json::Value::String(self.state.clone());
         }
 
-        let body = response
-            .text()
-            .await
-            .context("Failed to read token response body")?;
-        tracing::debug!("Token response body: {}", body);
-
-        let token_response: TokenResponse = serde_json::from_str(&body)
-            .context(format!("Failed to parse token response: {}", body))?;
-
-        Ok(AuthToken {
-            provider: self.config.provider.clone(),
-            access_token: token_response.access_token,
-            refresh_token: token_response.refresh_token,
-            expires_at: token_response.expires_in.map(|exp| {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64
-                    + exp
-            }),
-        })
+        send_token_request(&self.http_client, &self.config, &params).await
     }
 }
 
@@ -144,7 +204,8 @@ impl OAuthProvider {
         }
     }
 
-    /// Generate PKCE challenge
+    /// Generate PKCE challenge.
+    /// Returns (verifier, challenge) where verifier is a 43-char base64url string.
     fn generate_pkce() -> (String, String) {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
@@ -173,30 +234,31 @@ impl OAuthProvider {
     /// Build the authorization URL with PKCE parameters.
     /// Returns (url, verifier, state).
     fn build_auth_url(&self) -> Result<(Url, String, String)> {
-        let state = Self::generate_state();
         let (verifier, challenge) = Self::generate_pkce();
 
-        let mut auth_url = Url::parse(&self.config.auth_url)?;
-        auth_url
-            .query_pairs_mut()
-            .append_pair("client_id", &self.config.client_id)
-            .append_pair("redirect_uri", &self.config.redirect_uri)
-            .append_pair("response_type", "code")
-            .append_pair("state", &state)
-            .append_pair("code_challenge", &challenge)
-            .append_pair("code_challenge_method", "S256");
+        // Per the Anthropic spec, state must equal the code_verifier
+        let state = if self.config.state_equals_verifier {
+            verifier.clone()
+        } else {
+            Self::generate_state()
+        };
 
-        // For code-paste flows, add code=true to indicate the server
-        // should show the code to the user instead of redirecting
+        let mut auth_url = Url::parse(&self.config.auth_url)?;
+
+        // For code-paste flows (Anthropic), add code=true first
         if self.config.flow_type == OAuthFlowType::CodePaste {
             auth_url.query_pairs_mut().append_pair("code", "true");
         }
 
-        if !self.config.scopes.is_empty() {
-            auth_url
-                .query_pairs_mut()
-                .append_pair("scope", &self.config.scopes.join(" "));
-        }
+        auth_url
+            .query_pairs_mut()
+            .append_pair("response_type", "code")
+            .append_pair("client_id", &self.config.client_id)
+            .append_pair("redirect_uri", &self.config.redirect_uri)
+            .append_pair("scope", &self.config.scopes.join(" "))
+            .append_pair("code_challenge", &challenge)
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("state", &state);
 
         Ok((auth_url, verifier, state))
     }
@@ -212,85 +274,27 @@ impl OAuthProvider {
         Ok(PendingCodePaste {
             auth_url: auth_url.to_string(),
             verifier,
-            _state: state,
+            state,
             config: self.config.clone(),
             http_client: self.http_client.clone(),
         })
     }
 
-    /// Exchange code for token (shared logic)
-    async fn exchange_code(&self, code: &str, verifier: &str) -> Result<AuthToken> {
-        let token_params = [
-            ("grant_type", "authorization_code"),
-            ("code", code),
-            ("client_id", self.config.client_id.as_str()),
-            ("redirect_uri", self.config.redirect_uri.as_str()),
-            ("code_verifier", verifier),
-        ];
+    /// Exchange code for token (used by auto-redirect flow)
+    async fn exchange_code(&self, code: &str, verifier: &str, state: &str) -> Result<AuthToken> {
+        let mut params = serde_json::json!({
+            "grant_type": "authorization_code",
+            "code": code,
+            "client_id": self.config.client_id,
+            "redirect_uri": self.config.redirect_uri,
+            "code_verifier": verifier,
+        });
 
-        tracing::debug!(
-            "Exchanging code: token_url={}, client_id={}, redirect_uri={}, code_len={}, verifier_len={}",
-            self.config.token_url,
-            self.config.client_id,
-            self.config.redirect_uri,
-            code.len(),
-            verifier.len()
-        );
-
-        let response = self
-            .http_client
-            .post(&self.config.token_url)
-            .form(&token_params)
-            .send()
-            .await
-            .context("Failed to exchange authorization code")?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "(failed to read response body)".to_string());
-            tracing::error!(
-                "Token exchange failed: status={}, url={}, body={}",
-                status,
-                self.config.token_url,
-                body
-            );
-
-            if let Ok(error) = serde_json::from_str::<OAuthError>(&body) {
-                anyhow::bail!(
-                    "OAuth token exchange failed ({}): {} - {}",
-                    status,
-                    error.error,
-                    error.error_description.unwrap_or_default()
-                );
-            } else {
-                anyhow::bail!("OAuth token exchange failed ({}): {}", status, body);
-            }
+        if self.config.state_equals_verifier {
+            params["state"] = serde_json::Value::String(state.to_string());
         }
 
-        let body = response
-            .text()
-            .await
-            .context("Failed to read token response body")?;
-        tracing::debug!("Token response body: {}", body);
-
-        let token_response: TokenResponse = serde_json::from_str(&body)
-            .context(format!("Failed to parse token response: {}", body))?;
-
-        Ok(AuthToken {
-            provider: self.config.provider.clone(),
-            access_token: token_response.access_token,
-            refresh_token: token_response.refresh_token,
-            expires_at: token_response.expires_in.map(|exp| {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64
-                    + exp
-            }),
-        })
+        send_token_request(&self.http_client, &self.config, &params).await
     }
 
     /// Auto-redirect login: starts localhost callback server, opens browser,
@@ -302,7 +306,7 @@ impl OAuthProvider {
         let (tx, rx) = oneshot::channel();
         let callback_state = Arc::new(Mutex::new(CallbackState {
             sender: Some(tx),
-            expected_state: state,
+            expected_state: state.clone(),
         }));
 
         // Start local server for callback
@@ -334,7 +338,7 @@ impl OAuthProvider {
         server_handle.abort();
 
         // Exchange code for token
-        self.exchange_code(&code, &verifier).await
+        self.exchange_code(&code, &verifier, &state).await
     }
 }
 
@@ -370,45 +374,13 @@ impl AuthProvider for OAuthProvider {
             .as_ref()
             .context("No refresh token available")?;
 
-        let token_params = [
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token.as_str()),
-            ("client_id", self.config.client_id.as_str()),
-        ];
+        let params = serde_json::json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": self.config.client_id,
+        });
 
-        let response = self
-            .http_client
-            .post(&self.config.token_url)
-            .form(&token_params)
-            .send()
-            .await
-            .context("Failed to refresh token")?;
-
-        if !response.status().is_success() {
-            let error: OAuthError = response.json().await?;
-            anyhow::bail!(
-                "OAuth token refresh failed: {} - {}",
-                error.error,
-                error.error_description.unwrap_or_default()
-            );
-        }
-
-        let token_response: TokenResponse = response.json().await?;
-
-        Ok(AuthToken {
-            provider: self.config.provider.clone(),
-            access_token: token_response.access_token,
-            refresh_token: token_response
-                .refresh_token
-                .or_else(|| token.refresh_token.clone()),
-            expires_at: token_response.expires_in.map(|exp| {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64
-                    + exp
-            }),
-        })
+        send_token_request(&self.http_client, &self.config, &params).await
     }
 
     async fn validate(&self, token: &AuthToken) -> Result<bool> {
