@@ -17,11 +17,13 @@ use url::Url;
 
 use crate::{AuthConfig, AuthProvider, AuthToken, OAuthFlowType, TokenRequestFormat};
 
-/// OAuth authorization code response
+/// OAuth authorization code response (or error)
 #[derive(Debug, Deserialize)]
 struct AuthCallback {
-    code: String,
+    code: Option<String>,
     state: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
 }
 
 /// OAuth token response
@@ -443,6 +445,20 @@ async fn handle_callback(
 ) -> Html<&'static str> {
     let mut state_lock = state.lock().await;
 
+    // Check for OAuth error response (e.g. access_denied, invalid_scope)
+    if let Some(error) = &params.error {
+        let desc = params
+            .error_description
+            .as_deref()
+            .unwrap_or("Unknown error");
+        tracing::error!("OAuth callback error: {} - {}", error, desc);
+        if let Some(sender) = state_lock.sender.take() {
+            let _ = sender.send(Err(anyhow::anyhow!("OAuth error: {} - {}", error, desc)));
+        }
+        return Html(ERROR_HTML);
+    }
+
+    // Validate state
     if params.state.as_ref() != Some(&state_lock.expected_state) {
         if let Some(sender) = state_lock.sender.take() {
             let _ = sender.send(Err(anyhow::anyhow!("Invalid state parameter")));
@@ -450,8 +466,16 @@ async fn handle_callback(
         return Html(ERROR_HTML);
     }
 
+    // Extract code
+    let Some(code) = params.code else {
+        if let Some(sender) = state_lock.sender.take() {
+            let _ = sender.send(Err(anyhow::anyhow!("No authorization code in callback")));
+        }
+        return Html(ERROR_HTML);
+    };
+
     if let Some(sender) = state_lock.sender.take() {
-        let _ = sender.send(Ok(params.code));
+        let _ = sender.send(Ok(code));
     }
 
     Html(SUCCESS_HTML)
