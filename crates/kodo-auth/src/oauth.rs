@@ -343,11 +343,11 @@ impl OAuthProvider {
             .layer(CorsLayer::permissive())
             .with_state(callback_state);
 
-        // Extract host:port from the redirect_uri
+        // Extract port from redirect_uri, bind to all interfaces so both
+        // localhost (which may resolve to ::1 on macOS) and 127.0.0.1 work.
         let redirect_url = Url::parse(&self.config.redirect_uri).context("Invalid redirect_uri")?;
-        let host = redirect_url.host_str().unwrap_or("127.0.0.1");
         let port = redirect_url.port().unwrap_or(8899);
-        let bind_addr = format!("{}:{}", host, port);
+        let bind_addr = format!("0.0.0.0:{}", port);
 
         tracing::debug!("Binding OAuth callback server to {}", bind_addr);
         let listener = tokio::net::TcpListener::bind(&bind_addr)
