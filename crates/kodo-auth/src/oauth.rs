@@ -271,6 +271,11 @@ impl OAuthProvider {
             .append_pair("code_challenge_method", "S256")
             .append_pair("state", &state);
 
+        // Add audience if configured (required by OpenAI OIDC)
+        if let Some(ref audience) = self.config.audience {
+            auth_url.query_pairs_mut().append_pair("audience", audience);
+        }
+
         Ok((auth_url, verifier, state))
     }
 

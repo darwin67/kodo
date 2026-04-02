@@ -54,6 +54,8 @@ pub struct AuthConfig {
     pub redirect_uri: String,
     /// Required OAuth scopes
     pub scopes: Vec<String>,
+    /// Optional audience parameter for the authorize request
+    pub audience: Option<String>,
     /// The type of OAuth callback flow
     pub flow_type: OAuthFlowType,
     /// Content type for token exchange requests
@@ -87,6 +89,7 @@ impl AuthConfig {
                 "user:profile".to_string(),
                 "user:inference".to_string(),
             ],
+            audience: None,
             flow_type: OAuthFlowType::CodePaste,
             token_request_format: TokenRequestFormat::Json,
             state_equals_verifier: true,
@@ -106,13 +109,14 @@ impl AuthConfig {
                 .unwrap_or_else(|_| "app_EMoamEEZ73f0CkXaXp7hrann".to_string()),
             auth_url: "https://auth.openai.com/oauth/authorize".to_string(),
             token_url: "https://auth.openai.com/oauth/token".to_string(),
-            redirect_uri: "http://localhost:8899/auth/callback".to_string(),
+            redirect_uri: "http://127.0.0.1:8899/auth/callback".to_string(),
             scopes: vec![
                 "openid".to_string(),
                 "profile".to_string(),
                 "email".to_string(),
                 "offline_access".to_string(),
             ],
+            audience: Some("https://api.openai.com/v1".to_string()),
             flow_type: OAuthFlowType::AutoRedirect,
             token_request_format: TokenRequestFormat::FormEncoded,
             state_equals_verifier: false,
