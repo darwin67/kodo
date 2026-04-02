@@ -481,6 +481,15 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
         Message::ModelModalSelect => handle_model_modal_select(model),
 
         Message::ModelsFetched { provider, models } => {
+            if model.debug_mode {
+                let ids: Vec<&str> = models.iter().map(|(id, _)| id.as_str()).collect();
+                model.debug_logs.push(format!(
+                    "MODELS [{}]: {} models fetched: {}",
+                    provider,
+                    models.len(),
+                    ids.join(", ")
+                ));
+            }
             // Only update if the modal is still showing the same provider
             if model.model_modal != ModelModalState::Closed {
                 model.model_options = models
