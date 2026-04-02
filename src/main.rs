@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use clap::Parser;
 use tokio::sync::mpsc;
 
-use kodo_auth::{AuthConfig, AuthProvider, oauth::OAuthProvider, storage::TokenStorage};
+use kodo_auth::{AuthConfig, AuthProvider, AuthToken, oauth::OAuthProvider, storage::TokenStorage};
 use kodo_config::{Config, loader::load_or_default};
 use kodo_core::agent::{Agent, AgentEvent};
 use kodo_llm::anthropic::AnthropicProvider;
@@ -16,7 +16,7 @@ use kodo_llm::provider::Provider;
 use kodo_ui::command::Command;
 use kodo_ui::event::{EventHandler, map_event};
 use kodo_ui::message::Message;
-use kodo_ui::model::Model;
+use kodo_ui::model::{AuthMethod, Model, ProviderModalState, ProviderOption};
 use kodo_ui::tui::{init_terminal, restore_terminal, view};
 use kodo_ui::update::update;
 
@@ -40,33 +40,26 @@ struct Cli {
     auth: Option<String>,
 }
 
-fn create_provider(name: &str) -> Result<Arc<dyn Provider>> {
+fn create_provider(name: &str, api_key: Option<&str>) -> Result<Arc<dyn Provider>> {
     match name {
-        "anthropic" => Ok(Arc::new(AnthropicProvider::from_env()?)),
-        "openai" => Ok(Arc::new(OpenAiProvider::from_env()?)),
+        "anthropic" => {
+            if let Some(key) = api_key {
+                Ok(Arc::new(AnthropicProvider::new(key.to_string())))
+            } else {
+                Ok(Arc::new(AnthropicProvider::from_env()?))
+            }
+        }
+        "openai" => {
+            if let Some(key) = api_key {
+                Ok(Arc::new(OpenAiProvider::new(key.to_string())))
+            } else {
+                Ok(Arc::new(OpenAiProvider::from_env()?))
+            }
+        }
         "gemini" => Ok(Arc::new(GeminiProvider::from_env()?)),
         "ollama" => Ok(Arc::new(OllamaProvider::from_env())),
         _ => bail!("unknown provider: {name}. Available: anthropic, openai, gemini, ollama"),
     }
-}
-
-fn create_provider_with_config(name: &str, config: &Config) -> Result<Arc<dyn Provider>> {
-    // For now, just use the existing create_provider function
-    // TODO: In the future, use config to override provider settings
-    // like API keys, base URLs, timeouts, etc.
-    let provider = create_provider(name)?;
-
-    // Log if provider config exists
-    if let Some(provider_config) = config.providers.get(name) {
-        if provider_config.api_key.is_some() {
-            tracing::debug!("Found API key in config for provider: {}", name);
-        }
-        if let Some(timeout) = provider_config.timeout {
-            tracing::debug!("Found timeout override in config: {}s", timeout);
-        }
-    }
-
-    Ok(provider)
 }
 
 fn default_model(provider_name: &str) -> &str {
@@ -80,11 +73,98 @@ fn default_model(provider_name: &str) -> &str {
 }
 
 /// Messages sent from the TUI event loop to the agent task.
-/// Agent communication types
 #[derive(Debug)]
 enum AgentRequest {
     ProcessMessage(String),
+    /// Replace the current agent with a new provider/model
+    SwitchProvider {
+        provider_name: String,
+        model: String,
+        api_key: String,
+    },
     Quit,
+}
+
+/// Path to the last-used session file for persisting provider/model choice
+fn session_state_path() -> std::path::PathBuf {
+    let config_dir = dirs_next::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("kodo");
+    let _ = std::fs::create_dir_all(&config_dir);
+    config_dir.join("last_session.json")
+}
+
+/// Persisted session state (last used provider and model)
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct SessionState {
+    provider: Option<String>,
+    model: Option<String>,
+}
+
+fn load_session_state() -> SessionState {
+    let path = session_state_path();
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        SessionState::default()
+    }
+}
+
+fn save_session_state(provider: &str, model: &str) {
+    let state = SessionState {
+        provider: Some(provider.to_string()),
+        model: Some(model.to_string()),
+    };
+    let path = session_state_path();
+    if let Ok(data) = serde_json::to_string_pretty(&state) {
+        let _ = std::fs::write(&path, data);
+    }
+}
+
+/// Build the list of available provider options for the connect modal
+async fn build_provider_options() -> Vec<ProviderOption> {
+    let storage = TokenStorage::new("kodo");
+
+    let anthropic_authed = std::env::var("ANTHROPIC_API_KEY").is_ok()
+        || storage.get("anthropic").await.ok().flatten().is_some();
+
+    let openai_authed = std::env::var("OPENAI_API_KEY").is_ok()
+        || storage.get("openai").await.ok().flatten().is_some();
+
+    let openai_config = AuthConfig::openai();
+
+    vec![
+        ProviderOption {
+            id: "anthropic".to_string(),
+            display_name: "Anthropic (Claude)".to_string(),
+            // Anthropic has no public OAuth; API key only
+            auth_methods: vec![AuthMethod::ApiKey],
+            is_authenticated: anthropic_authed,
+        },
+        ProviderOption {
+            id: "openai".to_string(),
+            display_name: "OpenAI (GPT / o-series)".to_string(),
+            auth_methods: if openai_config.supports_oauth() {
+                vec![AuthMethod::OAuth, AuthMethod::ApiKey]
+            } else {
+                vec![AuthMethod::ApiKey]
+            },
+            is_authenticated: openai_authed,
+        },
+        ProviderOption {
+            id: "gemini".to_string(),
+            display_name: "Google (Gemini)".to_string(),
+            auth_methods: vec![AuthMethod::ApiKey],
+            is_authenticated: std::env::var("GEMINI_API_KEY").is_ok()
+                || std::env::var("GOOGLE_API_KEY").is_ok(),
+        },
+        ProviderOption {
+            id: "ollama".to_string(),
+            display_name: "Ollama (Local)".to_string(),
+            auth_methods: vec![],   // No auth needed
+            is_authenticated: true, // Always available
+        },
+    ]
 }
 
 #[tokio::main]
@@ -95,157 +175,160 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .with_target(false)
-        .with_writer(std::io::stderr) // Log to stderr, not stdout (TUI owns stdout).
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
 
-    // Handle authentication command
+    // Handle --auth command (non-TUI flow)
     if let Some(auth_provider) = cli.auth {
         handle_auth(&auth_provider).await?;
         return Ok(());
     }
 
-    // Try to setup OAuth tokens as env vars
+    // Try to setup OAuth tokens as env vars from stored credentials
     setup_oauth_tokens().await?;
 
     // Load configuration
     let config = load_or_default();
 
-    // Determine provider and model from CLI args or config
+    // Load last session state for provider/model defaults
+    let session_state = load_session_state();
+
+    // Determine provider and model from: CLI args > last session > config > defaults
     let provider_name = cli
         .provider
-        .as_deref()
-        .unwrap_or(&config.general.default_provider);
-    let provider = match create_provider_with_config(provider_name, &config) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Error: Failed to initialize {} provider", provider_name);
-            eprintln!("");
-            eprintln!("To authenticate with {}, run:", provider_name);
-            eprintln!("  kodo --auth {}", provider_name);
-            eprintln!("");
-            eprintln!("Or set the environment variable:");
-            match provider_name {
-                "anthropic" => eprintln!("  export ANTHROPIC_API_KEY=your-api-key"),
-                "openai" => eprintln!("  export OPENAI_API_KEY=your-api-key"),
-                "gemini" => eprintln!("  export GEMINI_API_KEY=your-api-key"),
-                _ => {}
-            }
-            return Err(e);
-        }
-    };
-    let model = cli.model.unwrap_or_else(|| {
-        // Check provider-specific default model first
-        config
-            .providers
-            .get(provider_name)
-            .and_then(|p| p.default_model.clone())
+        .clone()
+        .or_else(|| session_state.provider.clone())
+        .unwrap_or_else(|| config.general.default_provider.clone());
+
+    // Try to create the provider. If it fails, we'll launch TUI in "needs provider" mode.
+    let maybe_provider = create_provider(&provider_name, None);
+
+    let model_name = cli.model.clone().unwrap_or_else(|| {
+        session_state
+            .model
+            .clone()
+            .or_else(|| {
+                config
+                    .providers
+                    .get(&provider_name)
+                    .and_then(|p| p.default_model.clone())
+            })
             .unwrap_or_else(|| {
-                // Fall back to general default model
                 if config.general.default_model.is_empty() {
-                    default_model(provider_name).to_string()
+                    default_model(&provider_name).to_string()
                 } else {
                     config.general.default_model.clone()
                 }
             })
     });
 
-    let mut agent = Agent::new(provider).with_model(&model);
-
-    // Set max concurrent subagents from config
-    agent.set_max_concurrent_subagents(config.general.max_subagents);
-
-    // Configure custom LSP servers from config
-    agent.configure_lsp_servers(&config.lsp_servers, config.general.auto_install_lsp);
-
-    // Configure custom formatters from config
-    agent.configure_formatters(&config.formatters);
-
-    kodo_tools::register_builtin_tools(agent.tool_registry_mut());
-
     // Initialize terminal
     let mut terminal = init_terminal()?;
     let mut events = EventHandler::new(Duration::from_millis(100));
 
-    // Initialize application state (Model) following Elm Architecture
+    // Initialize application state
     let debug_enabled = cli.debug || config.general.debug;
     let mut model = Model::new(debug_enabled);
-    model.provider = agent.provider_name().to_string();
-    model.model_name = agent.model().to_string();
-    model.mode = agent.mode.to_string();
 
-    // Initialize context information
-    let context = agent.context();
-    model.context_tokens = context.current_conversation_tokens;
-    model.context_limit = context.current_model_limit;
+    // Build provider options for the connect modal
+    let provider_options = build_provider_options().await;
+    model.provider_options = provider_options;
+
+    // Channel for agent events -> TUI
+    let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
+    // Channel for TUI -> agent requests
+    let (req_tx, mut req_rx) = mpsc::unbounded_channel::<AgentRequest>();
+    // Channel for OAuth/provider messages back to TUI
+    let (ui_msg_tx, mut ui_msg_rx) = mpsc::unbounded_channel::<Message>();
+
+    let has_provider = maybe_provider.is_ok();
+
+    if let Ok(provider) = maybe_provider {
+        // Provider available, set up agent
+        let mut agent = Agent::new(provider).with_model(&model_name);
+        agent.set_max_concurrent_subagents(config.general.max_subagents);
+        agent.configure_lsp_servers(&config.lsp_servers, config.general.auto_install_lsp);
+        agent.configure_formatters(&config.formatters);
+        kodo_tools::register_builtin_tools(agent.tool_registry_mut());
+
+        model.provider = agent.provider_name().to_string();
+        model.model_name = agent.model().to_string();
+        model.mode = agent.mode.to_string();
+
+        let context = agent.context();
+        model.context_tokens = context.current_conversation_tokens;
+        model.context_limit = context.current_model_limit;
+
+        // Save this as the last used session
+        save_session_state(&model.provider, &model.model_name);
+
+        // Spawn agent task
+        let agent_event_tx = agent_tx.clone();
+        let config_clone = config.clone();
+        tokio::spawn(async move {
+            run_agent_loop(agent, &mut req_rx, &agent_event_tx, &config_clone).await;
+        });
+    } else {
+        // No provider available - show the connect modal
+        model.needs_provider = true;
+        model.provider_modal = ProviderModalState::SelectProvider;
+        model.provider = "none".to_string();
+        model.model_name = "none".to_string();
+
+        // Spawn agent task that will wait for a provider switch
+        let agent_event_tx = agent_tx.clone();
+        let config_clone = config.clone();
+        tokio::spawn(async move {
+            run_agent_loop_deferred(&mut req_rx, &agent_event_tx, &config_clone).await;
+        });
+    }
 
     if debug_enabled {
         model.debug_panel_open = true;
         model
             .debug_logs
             .push("Debug mode enabled. Toggle panel with F12".to_string());
+        if !has_provider {
+            model
+                .debug_logs
+                .push("No provider authenticated. Showing connect modal.".to_string());
+        }
     }
 
-    // Channel for agent events -> TUI
-    let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
-    // Channel for TUI -> agent requests
-    let (req_tx, mut req_rx) = mpsc::unbounded_channel::<AgentRequest>();
-
-    // Spawn agent task
-    let agent_event_tx = agent_tx.clone();
-    tokio::spawn(async move {
-        while let Some(request) = req_rx.recv().await {
-            match request {
-                AgentRequest::ProcessMessage(input) => {
-                    if let Err(e) = agent.process_message(&input, Some(&agent_event_tx)).await {
-                        let _ = agent_event_tx.send(AgentEvent::Error(format!("{e:#}")));
-                    }
-                    // Always send Done so the TUI knows processing finished
-                    let _ = agent_event_tx.send(AgentEvent::Done);
-                }
-                AgentRequest::Quit => {
-                    agent.shutdown_lsp().await;
-                    break;
-                }
-            }
-        }
-    });
-
-    // Main MVU (Model-View-Update) runtime loop following Elm Architecture
+    // Main MVU runtime loop
     loop {
         // VIEW: Render current model state
         terminal.draw(|frame| view(frame, &model))?;
 
-        // HANDLE EVENTS: Process input and agent events
+        // HANDLE EVENTS
         tokio::select! {
-            // Terminal/keyboard events -> Messages -> Update
+            // Terminal/keyboard events
             event_result = events.next() => {
                 let event = event_result?;
-
-                // Map crossterm Event to application Message
                 if let Some(message) = map_event(&event, &model) {
-                    // UPDATE: Pure function that modifies model and returns commands
                     let commands = update(&mut model, message);
-
-                    // EXECUTE COMMANDS: Handle side effects
                     for command in commands {
-                        execute_command(command, &req_tx).await;
+                        execute_command(command, &req_tx, &ui_msg_tx).await;
                     }
                 }
             }
 
-            // Agent events -> Messages -> Update
+            // Agent events
             Some(agent_event) = agent_rx.recv() => {
-                // Map AgentEvent to application Message
                 let message = map_agent_event(agent_event);
-
-                // UPDATE: Pure function that modifies model and returns commands
                 let commands = update(&mut model, message);
-
-                // EXECUTE COMMANDS: Handle side effects
                 for command in commands {
-                    execute_command(command, &req_tx).await;
+                    execute_command(command, &req_tx, &ui_msg_tx).await;
+                }
+            }
+
+            // OAuth/provider UI messages (from background tasks)
+            Some(ui_message) = ui_msg_rx.recv() => {
+                let commands = update(&mut model, ui_message);
+                for command in commands {
+                    execute_command(command, &req_tx, &ui_msg_tx).await;
                 }
             }
         }
@@ -257,31 +340,248 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Cleanup: Restore terminal to normal mode
+    // Save session state on exit
+    if model.provider != "none" {
+        save_session_state(&model.provider, &model.model_name);
+    }
+
+    // Cleanup
     restore_terminal(&mut terminal)?;
     Ok(())
 }
 
-/// Execute Commands returned by update() - this is where side effects happen.
-/// The update() function is pure, but Commands describe side effects that
-/// the runtime must perform (sending messages to agents, quitting, etc).
-async fn execute_command(command: Command, req_tx: &mpsc::UnboundedSender<AgentRequest>) {
-    match command {
-        Command::SendToAgent(message) => {
-            let _ = req_tx.send(AgentRequest::ProcessMessage(message));
-        }
-        Command::Quit => {
-            let _ = req_tx.send(AgentRequest::Quit);
-        }
-        Command::None => {
-            // No-op
+/// Run the agent loop with an existing agent. Handles provider switching.
+async fn run_agent_loop(
+    mut agent: Agent,
+    req_rx: &mut mpsc::UnboundedReceiver<AgentRequest>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    config: &Config,
+) {
+    while let Some(request) = req_rx.recv().await {
+        match request {
+            AgentRequest::ProcessMessage(input) => {
+                if let Err(e) = agent.process_message(&input, Some(event_tx)).await {
+                    let _ = event_tx.send(AgentEvent::Error(format!("{e:#}")));
+                }
+                let _ = event_tx.send(AgentEvent::Done);
+            }
+            AgentRequest::SwitchProvider {
+                provider_name,
+                model,
+                api_key,
+            } => {
+                // Shutdown old LSP servers
+                agent.shutdown_lsp().await;
+
+                // Create new provider
+                let api_key_opt = if api_key.is_empty() {
+                    None
+                } else {
+                    Some(api_key.as_str())
+                };
+                match create_provider(&provider_name, api_key_opt) {
+                    Ok(provider) => {
+                        agent = Agent::new(provider).with_model(&model);
+                        agent.set_max_concurrent_subagents(config.general.max_subagents);
+                        agent.configure_lsp_servers(
+                            &config.lsp_servers,
+                            config.general.auto_install_lsp,
+                        );
+                        agent.configure_formatters(&config.formatters);
+                        kodo_tools::register_builtin_tools(agent.tool_registry_mut());
+
+                        save_session_state(&provider_name, &model);
+
+                        let _ = event_tx.send(AgentEvent::ContextUpdate {
+                            tokens: agent.context().current_conversation_tokens,
+                            limit: agent.context().current_model_limit,
+                            percent: 0.0,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = event_tx.send(AgentEvent::Error(format!(
+                            "Failed to switch provider: {e:#}"
+                        )));
+                    }
+                }
+            }
+            AgentRequest::Quit => {
+                agent.shutdown_lsp().await;
+                break;
+            }
         }
     }
 }
 
-/// Map AgentEvent to application Message.
-/// This converts external agent events into internal application messages
-/// that can be processed by the pure update() function.
+/// Run agent loop in deferred mode (no agent yet, wait for SwitchProvider first)
+async fn run_agent_loop_deferred(
+    req_rx: &mut mpsc::UnboundedReceiver<AgentRequest>,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    config: &Config,
+) {
+    while let Some(request) = req_rx.recv().await {
+        match request {
+            AgentRequest::SwitchProvider {
+                provider_name,
+                model,
+                api_key,
+            } => {
+                let api_key_opt = if api_key.is_empty() {
+                    None
+                } else {
+                    Some(api_key.as_str())
+                };
+                match create_provider(&provider_name, api_key_opt) {
+                    Ok(provider) => {
+                        let agent = Agent::new(provider).with_model(&model);
+                        save_session_state(&provider_name, &model);
+
+                        let _ = event_tx.send(AgentEvent::ContextUpdate {
+                            tokens: agent.context().current_conversation_tokens,
+                            limit: agent.context().current_model_limit,
+                            percent: 0.0,
+                        });
+
+                        // Now run the normal agent loop
+                        run_agent_loop(agent, req_rx, event_tx, config).await;
+                        return;
+                    }
+                    Err(e) => {
+                        let _ = event_tx.send(AgentEvent::Error(format!(
+                            "Failed to create provider: {e:#}"
+                        )));
+                    }
+                }
+            }
+            AgentRequest::ProcessMessage(_) => {
+                let _ = event_tx.send(AgentEvent::Error(
+                    "No provider configured. Use Ctrl+K > Connect Provider to authenticate."
+                        .to_string(),
+                ));
+                let _ = event_tx.send(AgentEvent::Done);
+            }
+            AgentRequest::Quit => {
+                break;
+            }
+        }
+    }
+}
+
+/// Execute Commands returned by update().
+async fn execute_command(
+    command: Command,
+    req_tx: &mpsc::UnboundedSender<AgentRequest>,
+    ui_msg_tx: &mpsc::UnboundedSender<Message>,
+) {
+    match command {
+        Command::SendToAgent(message) => {
+            let _ = req_tx.send(AgentRequest::ProcessMessage(message));
+        }
+        Command::StartOAuth { provider } => {
+            let ui_tx = ui_msg_tx.clone();
+            tokio::spawn(async move {
+                run_oauth_flow(&provider, ui_tx).await;
+            });
+        }
+        Command::StoreApiKey { provider, api_key } => {
+            let ui_tx = ui_msg_tx.clone();
+            tokio::spawn(async move {
+                store_api_key(&provider, &api_key, ui_tx).await;
+            });
+        }
+        Command::SwitchProvider {
+            provider,
+            model,
+            api_key,
+        } => {
+            let _ = req_tx.send(AgentRequest::SwitchProvider {
+                provider_name: provider,
+                model,
+                api_key,
+            });
+        }
+        Command::Quit => {
+            let _ = req_tx.send(AgentRequest::Quit);
+        }
+        Command::None => {}
+    }
+}
+
+/// Run the OAuth flow in a background task and send result back to UI
+async fn run_oauth_flow(provider_name: &str, ui_tx: mpsc::UnboundedSender<Message>) {
+    let config = match provider_name {
+        "openai" => AuthConfig::openai(),
+        other => {
+            let _ = ui_tx.send(Message::OAuthError {
+                provider: other.to_string(),
+                error: format!("{} does not support OAuth. Use an API key instead.", other),
+            });
+            return;
+        }
+    };
+
+    let oauth = OAuthProvider::new(config);
+    match oauth.login().await {
+        Ok(token) => {
+            // Store token securely
+            let storage = TokenStorage::new("kodo");
+            if let Err(e) = storage.store(&token).await {
+                tracing::error!("Failed to store OAuth token: {}", e);
+            }
+
+            // Set env var so provider can use it
+            let env_key = match provider_name {
+                "openai" => "OPENAI_API_KEY",
+                _ => return,
+            };
+            unsafe {
+                std::env::set_var(env_key, &token.access_token);
+            }
+
+            let _ = ui_tx.send(Message::OAuthComplete {
+                provider: provider_name.to_string(),
+                token: token.access_token,
+            });
+        }
+        Err(e) => {
+            let _ = ui_tx.send(Message::OAuthError {
+                provider: provider_name.to_string(),
+                error: format!("{e:#}"),
+            });
+        }
+    }
+}
+
+/// Store an API key and send success back to UI
+async fn store_api_key(provider_name: &str, api_key: &str, _ui_tx: mpsc::UnboundedSender<Message>) {
+    // Store in keychain via TokenStorage
+    let storage = TokenStorage::new("kodo");
+    let token = AuthToken {
+        provider: provider_name.to_string(),
+        access_token: api_key.to_string(),
+        refresh_token: None,
+        expires_at: None,
+    };
+    if let Err(e) = storage.store(&token).await {
+        tracing::error!("Failed to store API key: {}", e);
+    }
+
+    // Set env var so provider can use it immediately
+    let env_key = match provider_name {
+        "anthropic" => "ANTHROPIC_API_KEY",
+        "openai" => "OPENAI_API_KEY",
+        "gemini" => "GEMINI_API_KEY",
+        _ => return,
+    };
+    unsafe {
+        std::env::set_var(env_key, api_key);
+    }
+
+    // The modal will transition to AuthSuccess after StoreApiKey completes.
+    // No additional message needed since the update() already transitions state.
+}
+
+/// Map AgentEvent to application Message
 fn map_agent_event(event: AgentEvent) -> Message {
     match event {
         AgentEvent::TextDelta(chunk) => Message::AgentTextDelta(chunk),
@@ -316,7 +616,7 @@ async fn setup_oauth_tokens() -> Result<()> {
             unsafe {
                 std::env::set_var("ANTHROPIC_API_KEY", token.access_token);
             }
-            tracing::debug!("Loaded Anthropic token from OAuth storage");
+            tracing::debug!("Loaded Anthropic token from storage");
         }
     }
 
@@ -326,19 +626,23 @@ async fn setup_oauth_tokens() -> Result<()> {
             unsafe {
                 std::env::set_var("OPENAI_API_KEY", token.access_token);
             }
-            tracing::debug!("Loaded OpenAI token from OAuth storage");
+            tracing::debug!("Loaded OpenAI token from storage");
         }
     }
 
     Ok(())
 }
 
-/// Handle OAuth authentication flow
+/// Handle --auth CLI flag (non-TUI OAuth flow)
 async fn handle_auth(provider_name: &str) -> Result<()> {
-    println!("Starting authentication for {}...", provider_name);
-
     let config = match provider_name {
-        "anthropic" => AuthConfig::anthropic(),
+        "anthropic" => {
+            println!("Anthropic does not support OAuth. Please set your API key:");
+            println!("  export ANTHROPIC_API_KEY=your-api-key");
+            println!();
+            println!("Or run kodo and use the provider connect dialog to enter your key.");
+            return Ok(());
+        }
         "openai" => AuthConfig::openai(),
         _ => bail!(
             "Unsupported auth provider: {}. Available: anthropic, openai",
@@ -346,21 +650,16 @@ async fn handle_auth(provider_name: &str) -> Result<()> {
         ),
     };
 
+    println!("Starting authentication for {}...", provider_name);
+
     let oauth = OAuthProvider::new(config);
     let token = oauth.login().await?;
 
-    // Store token securely
     let storage = TokenStorage::new("kodo");
     storage.store(&token).await?;
 
     println!("Authentication successful! Token has been securely stored.");
-    println!();
-    println!("To use the authenticated token, set the environment variable:");
-    match provider_name {
-        "anthropic" => println!("export ANTHROPIC_API_KEY={}", token.access_token),
-        "openai" => println!("export OPENAI_API_KEY={}", token.access_token),
-        _ => {}
-    }
+    println!("You can now run kodo and it will use the stored credentials.");
 
     Ok(())
 }

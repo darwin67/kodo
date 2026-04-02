@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::keybinds::KeyAction;
 use crate::message::{Message, ThemeChoice};
-use crate::model::Model;
+use crate::model::{Model, ModelModalState, ProviderModalState};
 
 /// Application events.
 #[derive(Debug)]
@@ -92,6 +92,23 @@ pub fn map_event(event: &Event, model: &Model) -> Option<Message> {
 
 /// Map keyboard input to Messages based on current application state
 fn map_key_event(key: &KeyEvent, model: &Model) -> Option<Message> {
+    // Provider modal takes priority over everything except Ctrl+C
+    if model.provider_modal != ProviderModalState::Closed {
+        // Always allow Ctrl+C to quit
+        if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+            return Some(Message::Quit);
+        }
+        return map_provider_modal_input(key, model);
+    }
+
+    // Model modal takes priority
+    if model.model_modal != ModelModalState::Closed {
+        if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL {
+            return Some(Message::Quit);
+        }
+        return map_model_modal_input(key, model);
+    }
+
     // Check for leader key sequences first
     if model.leader_state.waiting_for_sequence {
         return handle_leader_sequence(key, model);
@@ -128,6 +145,66 @@ fn map_key_event(key: &KeyEvent, model: &Model) -> Option<Message> {
 
     // Ignore all input while streaming
     None
+}
+
+/// Map key events when the provider connect modal is open
+fn map_provider_modal_input(key: &KeyEvent, model: &Model) -> Option<Message> {
+    match &model.provider_modal {
+        ProviderModalState::EnterApiKey { .. } => {
+            // API key input mode
+            match key.code {
+                KeyCode::Char(ch) => Some(Message::ProviderModalApiKeyInput(ch)),
+                KeyCode::Backspace => Some(Message::ProviderModalApiKeyBackspace),
+                KeyCode::Enter => Some(Message::ProviderModalApiKeySubmit),
+                KeyCode::Esc => Some(Message::ProviderModalBack),
+                _ => None,
+            }
+        }
+        ProviderModalState::OAuthInProgress { .. } => {
+            // Only allow escape/back while waiting for OAuth
+            match key.code {
+                KeyCode::Esc => Some(Message::ProviderModalBack),
+                _ => None,
+            }
+        }
+        ProviderModalState::AuthSuccess { .. } => {
+            // Press enter to continue to model selection
+            match key.code {
+                KeyCode::Enter => Some(Message::ProviderModalSelect),
+                KeyCode::Esc => Some(Message::ProviderModalBack),
+                _ => None,
+            }
+        }
+        ProviderModalState::AuthError { .. } => {
+            // Press enter to go back and retry
+            match key.code {
+                KeyCode::Enter => Some(Message::ProviderModalSelect),
+                KeyCode::Esc => Some(Message::ProviderModalBack),
+                _ => None,
+            }
+        }
+        _ => {
+            // SelectProvider or SelectAuthMethod - list navigation
+            match key.code {
+                KeyCode::Up => Some(Message::ProviderModalUp),
+                KeyCode::Down => Some(Message::ProviderModalDown),
+                KeyCode::Enter => Some(Message::ProviderModalSelect),
+                KeyCode::Esc => Some(Message::CloseProviderModal),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Map key events when the model selection modal is open
+fn map_model_modal_input(key: &KeyEvent, _model: &Model) -> Option<Message> {
+    match key.code {
+        KeyCode::Up => Some(Message::ModelModalUp),
+        KeyCode::Down => Some(Message::ModelModalDown),
+        KeyCode::Enter => Some(Message::ModelModalSelect),
+        KeyCode::Esc => Some(Message::CloseModelModal),
+        _ => None,
+    }
 }
 
 /// Handle leader key sequences

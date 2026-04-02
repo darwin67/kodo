@@ -90,6 +90,50 @@ pub enum Message {
     /// Agent finished processing (no more streaming or tools)
     AgentDone,
 
+    // -- Provider connect modal --
+    /// Open the provider connect modal
+    OpenProviderModal,
+    /// Close the provider connect modal
+    CloseProviderModal,
+    /// Move selection up in provider modal
+    ProviderModalUp,
+    /// Move selection down in provider modal
+    ProviderModalDown,
+    /// Select the current item in provider modal (enter)
+    ProviderModalSelect,
+    /// User chose to enter API key manually
+    ProviderModalApiKeyInput(char),
+    /// User pressed backspace in API key input
+    ProviderModalApiKeyBackspace,
+    /// User submitted their API key
+    ProviderModalApiKeySubmit,
+    /// OAuth flow completed successfully
+    OAuthComplete { provider: String, token: String },
+    /// OAuth flow failed
+    OAuthError { provider: String, error: String },
+    /// Go back to the previous screen in provider modal
+    ProviderModalBack,
+
+    // -- Model selection modal --
+    /// Open the model selection modal
+    OpenModelModal,
+    /// Close the model selection modal
+    CloseModelModal,
+    /// Move selection up in model modal
+    ModelModalUp,
+    /// Move selection down in model modal
+    ModelModalDown,
+    /// Select the current model
+    ModelModalSelect,
+
+    // -- Provider switching --
+    /// Switch to a different provider and model at runtime
+    SwitchProvider {
+        provider: String,
+        model: String,
+        api_key: String,
+    },
+
     // -- System --
     /// Periodic tick for animations/updates
     Tick,

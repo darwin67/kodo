@@ -117,8 +117,10 @@ impl AuthProvider for OAuthProvider {
         }));
 
         // Start local server for callback
+        // Support both /callback and /auth/callback paths for compatibility
         let app = Router::new()
             .route("/callback", get(handle_callback))
+            .route("/auth/callback", get(handle_callback))
             .route("/success", get(handle_success))
             .route("/error", get(handle_error))
             .layer(CorsLayer::permissive())

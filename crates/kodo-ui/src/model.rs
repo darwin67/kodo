@@ -4,6 +4,60 @@ use crate::{
     theme::Theme,
 };
 
+/// Represents a connectable provider in the provider selection modal.
+#[derive(Debug, Clone)]
+pub struct ProviderOption {
+    pub id: String,
+    pub display_name: String,
+    pub auth_methods: Vec<AuthMethod>,
+    pub is_authenticated: bool,
+}
+
+/// How a provider can be authenticated.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AuthMethod {
+    /// OAuth browser-based flow
+    OAuth,
+    /// Manual API key entry
+    ApiKey,
+}
+
+/// Represents a selectable model.
+#[derive(Debug, Clone)]
+pub struct ModelOption {
+    pub id: String,
+    pub display_name: String,
+    pub provider: String,
+}
+
+/// State of the provider connect modal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProviderModalState {
+    /// Closed / not visible
+    Closed,
+    /// Showing the list of providers to connect
+    SelectProvider,
+    /// Showing auth method choice for a provider (OAuth vs API key)
+    SelectAuthMethod { provider: String },
+    /// Waiting for API key input
+    EnterApiKey { provider: String },
+    /// OAuth flow in progress (browser opened)
+    OAuthInProgress { provider: String },
+    /// Auth succeeded, ready to pick model
+    AuthSuccess { provider: String },
+    /// Auth failed with an error message
+    AuthError { provider: String, error: String },
+}
+
+/// State of the model selection modal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ModelModalState {
+    /// Closed / not visible
+    Closed,
+    /// Showing available models
+    SelectModel,
+}
+
 /// A message in the conversation display.
 /// Represents both user inputs and agent responses.
 #[derive(Debug, Clone)]
@@ -87,6 +141,28 @@ pub struct Model {
     /// State for handling leader key sequences
     pub leader_state: LeaderState,
 
+    // -- Provider connect modal --
+    /// Current state of the provider connect modal
+    pub provider_modal: ProviderModalState,
+    /// Available providers for connection
+    pub provider_options: Vec<ProviderOption>,
+    /// Selected index in provider list
+    pub provider_modal_selected: usize,
+    /// Selected index in auth method list
+    pub auth_method_selected: usize,
+    /// API key input buffer (for manual entry)
+    pub api_key_input: String,
+    /// Whether the app launched without any provider (needs auth before use)
+    pub needs_provider: bool,
+
+    // -- Model selection modal --
+    /// Current state of the model selection modal
+    pub model_modal: ModelModalState,
+    /// Available models for selection
+    pub model_options: Vec<ModelOption>,
+    /// Selected index in model list
+    pub model_modal_selected: usize,
+
     // -- Application lifecycle --
     /// Whether the application should terminate
     pub should_quit: bool,
@@ -134,6 +210,19 @@ impl Model {
             syntax_highlighter: None, // Lazy-initialized
             keybinds,
             leader_state: LeaderState::new(leader_timeout),
+
+            // Provider connect modal
+            provider_modal: ProviderModalState::Closed,
+            provider_options: Vec::new(),
+            provider_modal_selected: 0,
+            auth_method_selected: 0,
+            api_key_input: String::new(),
+            needs_provider: false,
+
+            // Model selection modal
+            model_modal: ModelModalState::Closed,
+            model_options: Vec::new(),
+            model_modal_selected: 0,
 
             // Application lifecycle
             should_quit: false,
