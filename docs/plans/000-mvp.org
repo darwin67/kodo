@@ -1,6 +1,6 @@
 #+TITLE: Kodo Strategy & Architecture Plan
 #+AUTHOR: Darwin D. Wu
-#+STATUS: ACTIVE
+#+STATUS: DONE
 #+DATE: <2026-03-27 Fri>
 
 Kodo is a model-agnostic, terminal-based coding agent written in Rust. It follows
