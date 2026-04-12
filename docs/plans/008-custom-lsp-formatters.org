@@ -1,0 +1,316 @@
+#+TITLE: Custom LSP Servers & Formatters via Config
+#+AUTHOR: Darwin D. Wu
+#+STATUS: TODO
+#+DATE: 2026-04-11
+#+DEPENDS_ON: 007-config-file-support
+
+* Motivation
+
+LSP servers and formatters are hardcoded in ~builtin_configs()~ and
+~register_builtins()~. Users working with languages not covered by the builtins
+(C/C++, Elixir, Zig, etc.) can't get diagnostics or formatting. The config file
+from plan 007 already defines the schema — this plan wires it into the LSP and
+formatter systems.
+
+* Scope
+
+Make ~LspServerConfig~ and ~FormatterConfig~ accept ~String~ (not ~&'static str~)
+so they can be constructed from config file data. Add methods to register custom
+entries from the parsed config.
+
+* Current State
+
+- ~LspServerConfig~ (kodo-lsp/config.rs:1-12) uses ~&'static str~ for all
+  string fields. Cannot be constructed from runtime data.
+- ~FormatterConfig~ (kodo-fmt/registry.rs:5-13) already uses owned ~String~.
+  Already supports ~register()~. Ready for custom entries.
+- ~builtin_configs()~ returns ~Vec<LspServerConfig>~ with 4 hardcoded entries.
+- ~register_builtins()~ in ~FormatterRegistry~ adds 4 formatters.
+
+* Files to Modify
+
+| File                             | What changes                                 |
+|----------------------------------+----------------------------------------------|
+| ~crates/kodo-lsp/src/config.rs~  | Change ~&'static str~ to ~String~            |
+| ~crates/kodo-lsp/src/manager.rs~ | Add method to register custom servers        |
+| ~crates/kodo-core/src/agent.rs~  | Accept config and register custom entries    |
+| ~src/main.rs~                    | Pass config's LSP/formatter entries to agent |
+
+* Step-by-step Plan
+
+** TODO Step 1: Change ~LspServerConfig~ to use owned strings
+
+*What*: Replace ~&'static str~ with ~String~ so configs can be built at runtime.
+
+*File*: ~crates/kodo-lsp/src/config.rs~
+
+*Change*: Replace the struct (lines 1-12):
+
+#+begin_src rust
+/// Configuration for an LSP server.
+#[derive(Debug, Clone)]
+pub struct LspServerConfig {
+    /// Display name.
+    pub name: String,
+    /// Command to start the server.
+    pub command: String,
+    /// Arguments to the command.
+    pub args: Vec<String>,
+    /// File extensions this server handles (without dot).
+    pub extensions: Vec<String>,
+}
+#+end_src
+
+*Change*: Update ~builtin_configs()~ to use ~String~ (lines 15-42):
+
+#+begin_src rust
+pub fn builtin_configs() -> Vec<LspServerConfig> {
+    vec![
+        LspServerConfig {
+            name: "rust-analyzer".into(),
+            command: "rust-analyzer".into(),
+            args: vec![],
+            extensions: vec!["rs".into()],
+        },
+        LspServerConfig {
+            name: "gopls".into(),
+            command: "gopls".into(),
+            args: vec!["serve".into()],
+            extensions: vec!["go".into()],
+        },
+        LspServerConfig {
+            name: "typescript-language-server".into(),
+            command: "typescript-language-server".into(),
+            args: vec!["--stdio".into()],
+            extensions: vec!["ts".into(), "tsx".into(), "js".into(), "jsx".into()],
+        },
+        LspServerConfig {
+            name: "pyright".into(),
+            command: "pyright-langserver".into(),
+            args: vec!["--stdio".into()],
+            extensions: vec!["py".into(), "pyi".into()],
+        },
+    ]
+}
+#+end_src
+
+*Change*: Update the tests — the test code that accesses ~.extensions~ was using
+~.contains(&"rs")~. With ~Vec<String>~, change to ~.contains(&"rs".to_string())~
+or use ~.iter().any(|e| e == "rs")~:
+
+#+begin_src rust
+#[test]
+fn rust_analyzer_config_has_rs_extension() {
+    let configs = builtin_configs();
+    let ra = configs.iter().find(|c| c.name == "rust-analyzer").unwrap();
+    assert!(ra.extensions.iter().any(|e| e == "rs"));
+}
+
+#[test]
+fn gopls_config_has_go_extension() {
+    let configs = builtin_configs();
+    let gopls = configs.iter().find(|c| c.name == "gopls").unwrap();
+    assert!(gopls.extensions.iter().any(|e| e == "go"));
+}
+
+#[test]
+fn typescript_config_has_all_extensions() {
+    let configs = builtin_configs();
+    let ts = configs.iter().find(|c| c.name == "typescript-language-server").unwrap();
+    assert!(ts.extensions.iter().any(|e| e == "ts"));
+    assert!(ts.extensions.iter().any(|e| e == "tsx"));
+    assert!(ts.extensions.iter().any(|e| e == "js"));
+    assert!(ts.extensions.iter().any(|e| e == "jsx"));
+}
+#+end_src
+
+*Checklist*:
+- [ ] ~LspServerConfig~ uses ~String~ for ~name~, ~command~
+- [ ] ~LspServerConfig~ uses ~Vec<String>~ for ~args~, ~extensions~
+- [ ] ~builtin_configs()~ constructs with ~.into()~ or ~String::from~
+- [ ] All tests updated to work with ~String~ instead of ~&str~
+- [ ] ~cargo build -p kodo-lsp~ succeeds
+- [ ] ~cargo test -p kodo-lsp~ passes
+
+** TODO Step 2: Fix any compilation errors in ~manager.rs~
+
+*What*: The manager likely accesses ~LspServerConfig~ fields. After changing to
+~String~, some code that borrowed ~&'static str~ may need updating.
+
+*File*: ~crates/kodo-lsp/src/manager.rs~
+
+*Action*: Run ~cargo build -p kodo-lsp~ and fix any compilation errors caused
+by the type change. Likely changes:
+- Code that took ~&str~ from config fields now gets ~&String~ (which coerces, should be fine)
+- Code that stored ~&'static str~ now needs to clone or own the ~String~
+
+*Checklist*:
+- [ ] ~cargo build -p kodo-lsp~ succeeds after manager.rs fixes
+- [ ] ~cargo test -p kodo-lsp~ passes
+
+** TODO Step 3: Add method to register custom LSP servers
+
+*What*: Allow the agent to register custom LSP servers from config at startup.
+
+*File*: ~crates/kodo-lsp/src/manager.rs~
+
+*Add method* to ~LspManager~:
+
+#+begin_src rust
+/// Register an additional LSP server configuration.
+/// Call after construction to add servers from config files.
+pub fn register_server(&mut self, config: LspServerConfig) {
+    if is_command_available(&config.command) {
+        tracing::debug!(name = %config.name, "registering custom LSP server");
+        // Store the config for this server
+        // (implementation depends on how LspManager stores configs internally)
+        for ext in &config.extensions {
+            self.extension_map.insert(ext.clone(), config.clone());
+        }
+    } else {
+        tracing::debug!(name = %config.name, command = %config.command, "custom LSP server not available on PATH");
+    }
+}
+#+end_src
+
+*Note*: The exact implementation depends on how ~LspManager~ stores its
+server configs internally. Read ~manager.rs~ to determine the field names
+and adapt accordingly.
+
+*Checklist*:
+- [ ] ~register_server()~ method exists on ~LspManager~
+- [ ] Checks if command is available on PATH
+- [ ] Maps extensions to the config for server lookup
+- [ ] ~cargo build -p kodo-lsp~ succeeds
+
+** TODO Step 4: Register custom formatters from config
+
+*What*: ~FormatterRegistry~ already has ~register()~. Just wire config entries.
+
+*File*: ~crates/kodo-core/src/agent.rs~ (or ~src/main.rs~)
+
+*Add function*:
+
+#+begin_src rust
+/// Register custom formatters from config.
+fn register_custom_formatters(
+    registry: &mut FormatterRegistry,
+    config: &FormattersConfig,
+) {
+    for (name, entry) in &config.formatters {
+        registry.register(FormatterConfig {
+            name: name.clone(),
+            command: entry.command.clone(),
+            extensions: entry.extensions.clone(),
+        });
+        tracing::debug!(name, "registered custom formatter");
+    }
+}
+#+end_src
+
+*Checklist*:
+- [ ] Custom formatters from config are registered in ~FormatterRegistry~
+- [ ] Uses existing ~register()~ method
+- [ ] ~cargo build~ succeeds
+
+** TODO Step 5: Register custom LSP servers from config
+
+*File*: ~src/main.rs~ or ~crates/kodo-core/src/agent.rs~
+
+*Add function*:
+
+#+begin_src rust
+/// Register custom LSP servers from config.
+fn register_custom_lsp_servers(
+    lsp_manager: &mut LspManager,
+    config: &LspConfig,
+) {
+    for (name, entry) in &config.servers {
+        let server_config = LspServerConfig {
+            name: name.clone(),
+            command: entry.command.clone(),
+            args: entry.args.clone(),
+            extensions: entry.extensions.clone(),
+        };
+        lsp_manager.register_server(server_config);
+    }
+}
+#+end_src
+
+*Change*: Call from ~main()~ after agent creation:
+
+#+begin_src rust
+// Register custom LSP servers and formatters from config
+if let Some(ref lsp_config) = config.lsp {
+    register_custom_lsp_servers(agent.lsp_manager_mut(), lsp_config);
+}
+if let Some(ref fmt_config) = config.formatters {
+    register_custom_formatters(agent.formatter_registry_mut(), fmt_config);
+}
+#+end_src
+
+*Note*: Need to add ~lsp_manager_mut()~ getter to Agent if it doesn't exist:
+
+#+begin_src rust
+pub fn lsp_manager_mut(&mut self) -> &mut LspManager {
+    &mut self.lsp_manager
+}
+#+end_src
+
+*Checklist*:
+- [ ] Custom LSP servers from config registered at startup
+- [ ] Custom formatters from config registered at startup
+- [ ] ~Agent~ has ~lsp_manager_mut()~ getter
+- [ ] ~cargo build~ succeeds
+
+** TODO Step 6: Tests
+
+*File*: ~crates/kodo-lsp/src/config.rs~ (add to existing tests)
+
+#+begin_src rust
+#[test]
+fn custom_config_with_owned_strings() {
+    let config = LspServerConfig {
+        name: "clangd".to_string(),
+        command: "clangd".to_string(),
+        args: vec!["--background-index".to_string()],
+        extensions: vec!["c".to_string(), "cpp".to_string(), "h".to_string()],
+    };
+    assert_eq!(config.name, "clangd");
+    assert_eq!(config.extensions.len(), 3);
+}
+#+end_src
+
+*File*: ~crates/kodo-fmt/src/registry.rs~ (add to existing tests)
+
+#+begin_src rust
+#[test]
+fn register_custom_formatter_from_config_data() {
+    let mut registry = FormatterRegistry::with_builtins();
+    registry.register(FormatterConfig {
+        name: "black".into(),
+        command: vec!["black".into(), "$FILE".into()],
+        extensions: vec!["py".into()],
+    });
+    // black should override ruff for .py
+    let fmt = registry.formatter_for(&PathBuf::from("test.py"));
+    assert!(fmt.is_some());
+    assert_eq!(fmt.unwrap().name, "black");
+}
+#+end_src
+
+*Checklist*:
+- [ ] Custom LSP config construction test passes
+- [ ] Custom formatter registration test passes
+- [ ] ~cargo test --workspace~ passes
+
+** TODO Step 7: Final verification
+
+*Checklist*:
+- [ ] ~cargo build~ clean
+- [ ] ~cargo test --workspace~ all pass
+- [ ] ~cargo clippy --workspace~ no warnings
+- [ ] ~LspServerConfig~ uses owned ~String~ types
+- [ ] Custom LSP servers from config are registered and discoverable
+- [ ] Custom formatters from config are registered and override builtins
+- [ ] Example config in docs or comments shows the TOML format

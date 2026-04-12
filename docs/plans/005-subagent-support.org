@@ -1,0 +1,392 @@
+#+TITLE: Subagent Support
+#+AUTHOR: Darwin D. Wu
+#+STATUS: TODO
+#+DATE: 2026-04-11
+#+DEPENDS_ON: 002-context-window-management (for token tracking)
+
+* Motivation
+
+Currently Kodo runs a single agent with one conversation context. Complex tasks
+benefit from spawning isolated "subagents" — separate agent instances with their
+own context, model, and tool permissions. For example, a main agent could spawn
+a research subagent to explore a codebase while the main context stays focused.
+
+* Scope
+
+Add a ~spawn_agent~ tool that the LLM can call to start an isolated agent task.
+The subagent runs to completion and returns its result as a tool output.
+
+* Current State
+
+- ~Agent~ (agent.rs:81-92) is a self-contained struct with its own provider,
+  messages, context tracker, tools, etc.
+- ~Agent::process_message()~ (agent.rs:164-202) runs the full agentic loop.
+- ~ToolRegistry~ (registry.rs) stores tools in a ~HashMap<String, Arc<dyn Tool>>~.
+- ~Tool~ trait (tool.rs:33-52) requires ~Send + Sync~, returns a pinned future.
+- ~ToolContext~ (tool.rs:25-28) has only ~working_dir: PathBuf~.
+
+* Files to Create
+
+| File                                   | Purpose                     |
+|----------------------------------------+-----------------------------|
+| ~crates/kodo-tools/src/spawn_agent.rs~ | The ~spawn_agent~ tool impl |
+
+* Files to Modify
+
+| File                            | What changes                    |
+|---------------------------------+---------------------------------|
+| ~crates/kodo-tools/src/lib.rs~  | Export ~spawn_agent~ module     |
+| ~crates/kodo-tools/src/tool.rs~ | Add ~provider~ to ~ToolContext~ |
+| ~crates/kodo-core/src/agent.rs~ | Pass provider into ToolContext  |
+| ~src/main.rs~                   | No changes needed               |
+
+* Step-by-step Plan
+
+** TODO Step 1: Extend ~ToolContext~ with provider reference
+
+*What*: The spawn_agent tool needs access to the LLM provider to create a
+subagent. Add it to ~ToolContext~.
+
+*File*: ~crates/kodo-tools/src/tool.rs~
+
+*Change*: Add provider to ~ToolContext~ (line 25-28):
+
+#+begin_src rust
+use std::sync::Arc;
+
+/// Context provided to tool execution.
+pub struct ToolContext {
+    /// The working directory for the current session.
+    pub working_dir: std::path::PathBuf,
+    /// The LLM provider (for tools that need to spawn agents).
+    pub provider: Option<Arc<dyn std::any::Any + Send + Sync>>,
+}
+#+end_src
+
+*Note*: We use ~Arc<dyn Any + Send + Sync>~ to avoid kodo-tools depending on
+kodo-llm. The spawn_agent tool will downcast to the concrete provider type.
+
+*Change*: Update all places that construct ~ToolContext~ to include
+~provider: None~. There are two:
+
+1. In ~agent.rs~ (line 323-325):
+#+begin_src rust
+let ctx = ToolContext {
+    working_dir: std::env::current_dir()?,
+    provider: Some(Arc::clone(&self.provider) as Arc<dyn std::any::Any + Send + Sync>),
+};
+#+end_src
+
+2. In test helpers (registry.rs ~make_ctx()~ test helper):
+#+begin_src rust
+fn make_ctx() -> ToolContext {
+    ToolContext {
+        working_dir: PathBuf::from("/tmp"),
+        provider: None,
+    }
+}
+#+end_src
+
+*Checklist*:
+- [ ] ~ToolContext~ has ~provider: Option<Arc<dyn Any + Send + Sync>>~ field
+- [ ] ~agent.rs~ passes the provider when creating ~ToolContext~
+- [ ] All test helpers updated to include ~provider: None~
+- [ ] ~cargo build --workspace~ succeeds
+- [ ] ~cargo test --workspace~ passes
+
+** TODO Step 2: Create ~spawn_agent.rs~ tool
+
+*What*: Implement a tool that spawns an isolated agent to handle a subtask.
+
+*File*: ~crates/kodo-tools/src/spawn_agent.rs~ (new file)
+
+#+begin_src rust
+use std::sync::Arc;
+
+use anyhow::{Result, bail};
+
+use crate::tool::{PermissionLevel, Tool, ToolContext, ToolOutput};
+
+/// Tool that spawns an isolated agent to handle a subtask.
+/// The subagent gets its own conversation context and runs to completion.
+pub struct SpawnAgentTool;
+
+impl Tool for SpawnAgentTool {
+    fn name(&self) -> &str {
+        "spawn_agent"
+    }
+
+    fn description(&self) -> &str {
+        "Spawn an isolated agent to handle a subtask. The subagent runs independently \
+         with its own conversation context and returns the result. Use this for \
+         research tasks, code exploration, or any subtask that benefits from \
+         a separate context window."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "The task description for the subagent to accomplish"
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model override for the subagent (defaults to parent's model)"
+                }
+            },
+            "required": ["task"]
+        })
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Execute
+    }
+
+    fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &ToolContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolOutput>> + Send + '_>> {
+        let task = params.get("task").and_then(|v| v.as_str()).map(String::from);
+        let model = params.get("model").and_then(|v| v.as_str()).map(String::from);
+        let working_dir = ctx.working_dir.clone();
+        let provider = ctx.provider.clone();
+
+        Box::pin(async move {
+            let task = match task {
+                Some(t) => t,
+                None => bail!("missing required parameter: task"),
+            };
+
+            let provider_any = match provider {
+                Some(p) => p,
+                None => bail!("spawn_agent requires a provider in the tool context"),
+            };
+
+            // Downcast to Provider trait object
+            // The provider is stored as Arc<dyn Any> to avoid circular deps.
+            // We need to get it back to Arc<dyn Provider>.
+            // This is done by the agent passing it correctly.
+            use kodo_llm::provider::Provider;
+            let provider: Arc<dyn Provider> = match provider_any.downcast::<Box<dyn Provider>>() {
+                Ok(p) => {
+                    // This path won't work directly — see alternative approach below
+                    bail!("provider downcast not supported in this configuration")
+                }
+                Err(_) => bail!("failed to downcast provider — spawn_agent unavailable"),
+            };
+
+            // NOTE: The downcast approach above is complex. A simpler alternative
+            // is implemented in Step 3 below using a callback pattern.
+            unreachable!()
+        })
+    }
+}
+#+end_src
+
+*Note*: The ~dyn Any~ downcast is tricky with trait objects. Step 3 replaces
+this with a cleaner callback approach.
+
+*Checklist*:
+- [ ] ~spawn_agent.rs~ file exists
+- [ ] ~SpawnAgentTool~ struct implements ~Tool~ trait
+- [ ] Parameters include ~task~ (required) and ~model~ (optional)
+- [ ] Permission level is ~Execute~
+
+** TODO Step 3: Replace downcast with callback-based agent spawning
+
+*What*: Instead of downcasting, add a spawn callback to ~ToolContext~.
+
+*File*: ~crates/kodo-tools/src/tool.rs~
+
+*Change*: Replace the ~provider~ field with a spawn callback:
+
+#+begin_src rust
+use std::future::Future;
+use std::pin::Pin;
+
+/// Function type for spawning a subagent.
+/// Takes a task string and optional model override.
+/// Returns the subagent's final text output.
+pub type SpawnAgentFn = Arc<
+    dyn Fn(String, Option<String>) -> Pin<Box<dyn Future<Output = Result<String>> + Send>>
+        + Send
+        + Sync
+>;
+
+/// Context provided to tool execution.
+pub struct ToolContext {
+    /// The working directory for the current session.
+    pub working_dir: std::path::PathBuf,
+    /// Callback to spawn a subagent (set by the agent runtime).
+    pub spawn_agent: Option<SpawnAgentFn>,
+}
+#+end_src
+
+*File*: ~crates/kodo-core/src/agent.rs~
+
+*Change*: Update ~ToolContext~ creation in ~handle_tool_calls()~ to provide the
+spawn callback:
+
+#+begin_src rust
+let provider = Arc::clone(&self.provider);
+let model = self.model.clone();
+
+let spawn_fn: SpawnAgentFn = Arc::new(move |task, model_override| {
+    let provider = Arc::clone(&provider);
+    let agent_model = model_override.unwrap_or_else(|| model.clone());
+    Box::pin(async move {
+        let mut subagent = Agent::new(provider).with_model(agent_model);
+        kodo_tools::register_builtin_tools(subagent.tool_registry_mut());
+        subagent.process_message(&task, None).await?;
+        // Return the last assistant message as the result
+        let result = subagent.messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Assistant)
+            .map(|m| m.text())
+            .unwrap_or_default();
+        Ok(result)
+    })
+});
+
+let ctx = ToolContext {
+    working_dir: std::env::current_dir()?,
+    spawn_agent: Some(spawn_fn),
+};
+#+end_src
+
+*File*: ~crates/kodo-tools/src/spawn_agent.rs~
+
+*Change*: Simplify the execute method to use the callback:
+
+#+begin_src rust
+fn execute(
+    &self,
+    params: serde_json::Value,
+    ctx: &ToolContext,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolOutput>> + Send + '_>> {
+    let task = params.get("task").and_then(|v| v.as_str()).map(String::from);
+    let model = params.get("model").and_then(|v| v.as_str()).map(String::from);
+    let spawn_fn = ctx.spawn_agent.clone();
+
+    Box::pin(async move {
+        let task = match task {
+            Some(t) => t,
+            None => bail!("missing required parameter: task"),
+        };
+
+        let spawn = match spawn_fn {
+            Some(f) => f,
+            None => bail!("subagent spawning is not available in this context"),
+        };
+
+        let result = spawn(task, model).await?;
+
+        Ok(ToolOutput {
+            content: result,
+            success: true,
+        })
+    })
+}
+#+end_src
+
+*Checklist*:
+- [ ] ~SpawnAgentFn~ type alias defined in ~tool.rs~
+- [ ] ~ToolContext~ has ~spawn_agent: Option<SpawnAgentFn>~
+- [ ] ~agent.rs~ provides a spawn callback that creates an ~Agent~ and runs it
+- [ ] ~spawn_agent.rs~ uses the callback, not downcasting
+- [ ] Test helpers set ~spawn_agent: None~
+- [ ] ~cargo build --workspace~ succeeds
+
+** TODO Step 4: Register the spawn_agent tool
+
+*What*: Add ~spawn_agent~ to the builtin tool registration.
+
+*File*: ~crates/kodo-tools/src/lib.rs~
+
+*Change*: Add ~pub mod spawn_agent;~ to module exports.
+
+*Change*: In ~register_builtin_tools()~ function, add:
+
+#+begin_src rust
+registry.register(Arc::new(spawn_agent::SpawnAgentTool));
+#+end_src
+
+*Checklist*:
+- [ ] ~pub mod spawn_agent;~ in ~lib.rs~
+- [ ] ~SpawnAgentTool~ registered in ~register_builtin_tools()~
+- [ ] ~cargo build --workspace~ succeeds
+
+** TODO Step 5: Tests
+
+*File*: ~crates/kodo-tools/src/spawn_agent.rs~
+
+*Add tests*:
+
+#+begin_src rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn tool_metadata() {
+        let tool = SpawnAgentTool;
+        assert_eq!(tool.name(), "spawn_agent");
+        assert_eq!(tool.permission_level(), PermissionLevel::Execute);
+        assert!(!tool.description().is_empty());
+    }
+
+    #[test]
+    fn parameters_schema_has_task() {
+        let tool = SpawnAgentTool;
+        let schema = tool.parameters_schema();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v.as_str() == Some("task")));
+    }
+
+    #[tokio::test]
+    async fn execute_without_spawn_fn_fails() {
+        let tool = SpawnAgentTool;
+        let ctx = ToolContext {
+            working_dir: PathBuf::from("/tmp"),
+            spawn_agent: None,
+        };
+        let params = serde_json::json!({"task": "test"});
+        let result = tool.execute(params, &ctx).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_without_task_fails() {
+        let tool = SpawnAgentTool;
+        let ctx = ToolContext {
+            working_dir: PathBuf::from("/tmp"),
+            spawn_agent: None,
+        };
+        let params = serde_json::json!({});
+        let result = tool.execute(params, &ctx).await;
+        assert!(result.is_err());
+    }
+}
+#+end_src
+
+*Checklist*:
+- [ ] Tool metadata tests pass
+- [ ] Execute without spawn_fn returns error
+- [ ] Execute without task parameter returns error
+- [ ] ~cargo test --workspace~ passes
+
+** TODO Step 6: Final verification
+
+*Checklist*:
+- [ ] ~cargo build~ clean
+- [ ] ~cargo test --workspace~ all pass
+- [ ] ~cargo clippy --workspace~ no warnings
+- [ ] ~spawn_agent~ tool appears in tool definitions
+- [ ] ~spawn_agent~ is gated behind ~Execute~ permission (denied in Plan mode)
+- [ ] Subagent runs with its own isolated message history
+- [ ] Subagent result is returned as tool output to the parent agent

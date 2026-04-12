@@ -1,0 +1,496 @@
+#+TITLE: OAuth Browser Login Flows
+#+AUTHOR: Darwin D. Wu
+#+STATUS: TODO
+#+DATE: 2026-04-11
+#+DEPENDS_ON: None
+
+* Motivation
+
+Auth currently requires manually setting environment variables
+(~ANTHROPIC_API_KEY~, ~OPENAI_API_KEY~, etc.). This is friction for new users
+and doesn't support token refresh.
+
+* Scope
+
+Add OAuth2 Authorization Code + PKCE flow for providers that support it.
+Start with a credential resolution chain (env var -> keychain -> prompt).
+
+* Current State
+
+- Providers use ~from_env()~ to read env vars (anthropic.rs:237, openai, gemini).
+- ~kodo-store/auth.rs~ has ~AuthToken~ struct with ~token~, ~refresh_token~,
+  ~expires_at~. Secrets go to OS keychain via ~keyring~ crate.
+- ~auth_providers~ table in SQLite stores only provider name + expiry.
+- No OAuth client, no browser flow, no token refresh.
+
+* Files to Create
+
+| File                             | Purpose                                   |
+|----------------------------------+-------------------------------------------|
+| ~crates/kodo-store/src/oauth.rs~ | OAuth client, PKCE, local callback server |
+
+* Files to Modify
+
+| File                               | What changes                                |
+|------------------------------------+---------------------------------------------|
+| ~crates/kodo-store/src/lib.rs~     | Add ~pub mod oauth~ export                  |
+| ~crates/kodo-store/src/auth.rs~    | Add ~refresh_if_needed()~, ~resolve_auth()~ |
+| ~crates/kodo-store/Cargo.toml~     | Add ~hyper~, ~open~, ~sha2~, ~base64~ deps  |
+| ~crates/kodo-llm/src/anthropic.rs~ | Use ~resolve_auth()~ instead of ~from_env~  |
+| ~crates/kodo-llm/src/openai.rs~    | Use ~resolve_auth()~ instead of ~from_env~  |
+| ~crates/kodo-llm/src/gemini.rs~    | Use ~resolve_auth()~ instead of ~from_env~  |
+| ~src/main.rs~                      | Add ~--login~ CLI arg                       |
+| ~crates/kodo-ui/src/message.rs~    | Add palette login commands                  |
+
+* Step-by-step Plan
+
+** TODO Step 1: Add dependencies to ~kodo-store/Cargo.toml~
+
+*What*: Add crates needed for the OAuth flow.
+
+*File*: ~crates/kodo-store/Cargo.toml~
+
+*Dependencies to add*:
+
+#+begin_src toml
+# OAuth support
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+open = "5"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+url = "2"
+#+end_src
+
+*Checklist*:
+- [ ] All dependencies added to ~[dependencies]~ in ~kodo-store/Cargo.toml~
+- [ ] ~cargo build -p kodo-store~ succeeds
+
+** TODO Step 2: Create ~oauth.rs~ — PKCE utilities
+
+*What*: Implement PKCE code_verifier and code_challenge generation.
+
+*File*: ~crates/kodo-store/src/oauth.rs~ (new file)
+
+#+begin_src rust
+use anyhow::Result;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use rand::Rng;
+use sha2::{Sha256, Digest};
+
+/// Generate a random PKCE code_verifier (43-128 chars, URL-safe).
+pub fn generate_code_verifier() -> String {
+    let mut rng = rand::thread_rng();
+    let bytes: Vec<u8> = (0..32).map(|_| rng.gen()).collect();
+    URL_SAFE_NO_PAD.encode(&bytes)
+}
+
+/// Derive the S256 code_challenge from a code_verifier.
+pub fn code_challenge(verifier: &str) -> String {
+    let hash = Sha256::digest(verifier.as_bytes());
+    URL_SAFE_NO_PAD.encode(&hash)
+}
+#+end_src
+
+*Tests*:
+
+#+begin_src rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn code_verifier_is_nonempty() {
+        let v = generate_code_verifier();
+        assert!(v.len() >= 43);
+    }
+
+    #[test]
+    fn code_challenge_is_deterministic() {
+        let v = "test_verifier";
+        let c1 = code_challenge(v);
+        let c2 = code_challenge(v);
+        assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn code_challenge_differs_from_verifier() {
+        let v = generate_code_verifier();
+        let c = code_challenge(&v);
+        assert_ne!(v, c);
+    }
+}
+#+end_src
+
+*Checklist*:
+- [ ] ~oauth.rs~ file created at ~crates/kodo-store/src/oauth.rs~
+- [ ] ~generate_code_verifier()~ returns a URL-safe random string >= 43 chars
+- [ ] ~code_challenge()~ returns base64url(sha256(verifier))
+- [ ] Tests pass
+- [ ] ~cargo test -p kodo-store~ passes
+
+** TODO Step 3: Add OAuth config struct and callback server to ~oauth.rs~
+
+*What*: Add ~OAuthConfig~ struct and a local HTTP server to receive the callback.
+
+*File*: ~crates/kodo-store/src/oauth.rs~ (append to existing)
+
+#+begin_src rust
+/// OAuth provider configuration.
+#[derive(Debug, Clone)]
+pub struct OAuthConfig {
+    pub provider: String,
+    pub client_id: String,
+    pub auth_url: String,
+    pub token_url: String,
+    pub scopes: Vec<String>,
+}
+
+/// Result of a successful OAuth flow.
+#[derive(Debug)]
+pub struct OAuthTokens {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    pub expires_in: Option<u64>,
+}
+
+/// Run the full OAuth Authorization Code + PKCE flow.
+///
+/// 1. Start a local HTTP server on a random port.
+/// 2. Open the browser to the authorize URL.
+/// 3. Wait for the callback with the auth code.
+/// 4. Exchange the code for tokens.
+/// 5. Return the tokens.
+pub async fn run_oauth_flow(config: &OAuthConfig) -> Result<OAuthTokens> {
+    let verifier = generate_code_verifier();
+    let challenge = code_challenge(&verifier);
+
+    // Bind to a random port on localhost
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    let redirect_uri = format!("http://127.0.0.1:{}/callback", port);
+
+    // Build the authorize URL
+    let mut auth_url = url::Url::parse(&config.auth_url)?;
+    auth_url.query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", &config.client_id)
+        .append_pair("redirect_uri", &redirect_uri)
+        .append_pair("code_challenge", &challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("scope", &config.scopes.join(" "));
+
+    // Open browser
+    tracing::info!("Opening browser for OAuth login...");
+    if let Err(e) = open::that(auth_url.as_str()) {
+        tracing::warn!("Failed to open browser: {}. Please open this URL manually:\n{}", e, auth_url);
+    }
+
+    // Wait for the callback (with a timeout)
+    let auth_code = wait_for_callback(listener).await?;
+
+    // Exchange code for tokens
+    let tokens = exchange_code(config, &auth_code, &verifier, &redirect_uri).await?;
+
+    Ok(tokens)
+}
+
+/// Wait for the OAuth callback on the local server. Returns the auth code.
+async fn wait_for_callback(listener: tokio::net::TcpListener) -> Result<String> {
+    use tokio::time::{timeout, Duration};
+
+    let result = timeout(Duration::from_secs(120), async {
+        let (stream, _) = listener.accept().await?;
+        let io = hyper_util::rt::TokioIo::new(stream);
+
+        let (auth_code_tx, mut auth_code_rx) = tokio::sync::mpsc::channel::<String>(1);
+
+        let service = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+            let tx = auth_code_tx.clone();
+            async move {
+                let uri = req.uri();
+                if let Some(query) = uri.query() {
+                    let params: Vec<(String, String)> = url::form_urlencoded::parse(query.as_bytes())
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect();
+                    if let Some((_, code)) = params.iter().find(|(k, _)| k == "code") {
+                        let _ = tx.send(code.clone()).await;
+                    }
+                }
+                let body = "Login successful! You can close this tab.";
+                Ok::<_, hyper::Error>(hyper::Response::new(
+                    http_body_util::Full::new(hyper::body::Bytes::from(body))
+                ))
+            }
+        });
+
+        hyper::server::conn::http1::Builder::new()
+            .serve_connection(io, service)
+            .await?;
+
+        auth_code_rx.recv().await
+            .ok_or_else(|| anyhow::anyhow!("no auth code received"))
+    }).await;
+
+    match result {
+        Ok(Ok(code)) => Ok(code),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(anyhow::anyhow!("OAuth login timed out after 120 seconds")),
+    }
+}
+
+/// Exchange the authorization code for access + refresh tokens.
+async fn exchange_code(
+    config: &OAuthConfig,
+    code: &str,
+    verifier: &str,
+    redirect_uri: &str,
+) -> Result<OAuthTokens> {
+    let client = reqwest::Client::new();
+
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("client_id", &config.client_id),
+        ("code_verifier", verifier),
+    ];
+
+    let resp = client.post(&config.token_url)
+        .form(&params)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let body = resp.text().await?;
+        anyhow::bail!("token exchange failed: {}", body);
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TokenResponse {
+        access_token: String,
+        refresh_token: Option<String>,
+        expires_in: Option<u64>,
+    }
+
+    let token_resp: TokenResponse = resp.json().await?;
+
+    Ok(OAuthTokens {
+        access_token: token_resp.access_token,
+        refresh_token: token_resp.refresh_token,
+        expires_in: token_resp.expires_in,
+    })
+}
+#+end_src
+
+*Checklist*:
+- [ ] ~OAuthConfig~ struct exists with ~provider~, ~client_id~, ~auth_url~, ~token_url~, ~scopes~
+- [ ] ~OAuthTokens~ struct exists with ~access_token~, ~refresh_token~, ~expires_in~
+- [ ] ~run_oauth_flow()~ starts local server, opens browser, waits for callback, exchanges code
+- [ ] Timeout of 120 seconds on callback wait
+- [ ] ~cargo build -p kodo-store~ succeeds
+
+** TODO Step 4: Add ~refresh_if_needed()~ to ~auth.rs~
+
+*What*: Check token expiry and refresh if needed.
+
+*File*: ~crates/kodo-store/src/auth.rs~
+
+*Add function* (after ~list_providers~):
+
+#+begin_src rust
+/// Check if the token for a provider is expired or near-expiry.
+/// If so, attempt to refresh it using the refresh_token.
+/// Returns the valid (possibly refreshed) token string, or None if unavailable.
+pub async fn refresh_if_needed(
+    pool: &DbPool,
+    store: &dyn SecretStore,
+    provider: &str,
+    token_url: &str,
+    client_id: &str,
+) -> Result<Option<String>> {
+    let token = match get_token(pool, store, provider).await? {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+
+    // Check expiry
+    if let Some(ref expires_at) = token.expires_at {
+        // Parse ISO 8601 datetime
+        if let Ok(expiry) = chrono::DateTime::parse_from_rfc3339(expires_at) {
+            let now = chrono::Utc::now();
+            let buffer = chrono::Duration::minutes(5);
+            if expiry - buffer > now {
+                // Token still valid
+                return Ok(Some(token.token));
+            }
+        }
+    } else {
+        // No expiry set — assume valid (API keys don't expire)
+        return Ok(Some(token.token));
+    }
+
+    // Token expired or near-expiry — try to refresh
+    let refresh_token = match token.refresh_token {
+        Some(rt) => rt,
+        None => {
+            debug!(provider, "token expired and no refresh token available");
+            return Ok(None);
+        }
+    };
+
+    debug!(provider, "refreshing expired token");
+
+    let client = reqwest::Client::new();
+    let params = [
+        ("grant_type", "refresh_token"),
+        ("refresh_token", &refresh_token),
+        ("client_id", client_id),
+    ];
+
+    let resp = client.post(token_url).form(&params).send().await?;
+    if !resp.status().is_success() {
+        let body = resp.text().await?;
+        anyhow::bail!("token refresh failed for {}: {}", provider, body);
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RefreshResponse {
+        access_token: String,
+        refresh_token: Option<String>,
+        expires_in: Option<u64>,
+    }
+
+    let refresh_resp: RefreshResponse = resp.json().await?;
+
+    let new_expires_at = refresh_resp.expires_in.map(|secs| {
+        let expiry = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+        expiry.to_rfc3339()
+    });
+
+    save_token(
+        pool,
+        store,
+        provider,
+        &refresh_resp.access_token,
+        refresh_resp.refresh_token.as_deref().or(Some(&refresh_token)),
+        new_expires_at.as_deref(),
+    )
+    .await?;
+
+    Ok(Some(refresh_resp.access_token))
+}
+#+end_src
+
+*Add dependency*: ~chrono~ to ~kodo-store/Cargo.toml~:
+#+begin_src toml
+chrono = { version = "0.4", features = ["serde"] }
+#+end_src
+
+*Checklist*:
+- [ ] ~refresh_if_needed()~ function exists in ~auth.rs~
+- [ ] Returns existing token if not expired
+- [ ] Returns existing token if no expiry is set (API keys)
+- [ ] Refreshes token if expired/near-expiry and refresh_token exists
+- [ ] Returns ~None~ if expired with no refresh_token
+- [ ] Updated token is saved to keychain + DB
+- [ ] ~chrono~ dependency added to Cargo.toml
+- [ ] ~cargo build -p kodo-store~ succeeds
+
+** TODO Step 5: Add ~resolve_auth()~ function
+
+*What*: Unified auth resolution: env var -> keychain -> error.
+
+*File*: ~crates/kodo-store/src/auth.rs~
+
+*Add function*:
+
+#+begin_src rust
+/// Resolve the API key / access token for a provider.
+/// Checks in order: environment variable, then OS keychain.
+/// Returns the token string or an error with login instructions.
+pub async fn resolve_auth(
+    pool: &DbPool,
+    store: &dyn SecretStore,
+    provider: &str,
+    env_var: &str,
+) -> Result<String> {
+    // 1. Check environment variable
+    if let Ok(key) = std::env::var(env_var) {
+        if !key.is_empty() {
+            return Ok(key);
+        }
+    }
+
+    // 2. Check keychain
+    if let Some(token) = get_token(pool, store, provider).await? {
+        return Ok(token.token);
+    }
+
+    // 3. Not found
+    anyhow::bail!(
+        "No credentials found for {}. Set {} environment variable or run: kodo --login {}",
+        provider, env_var, provider
+    )
+}
+#+end_src
+
+*Checklist*:
+- [ ] ~resolve_auth()~ checks env var first, then keychain
+- [ ] Returns helpful error message with login instructions
+- [ ] ~cargo build -p kodo-store~ succeeds
+
+** TODO Step 6: Add ~--login~ CLI argument
+
+*What*: Allow users to trigger OAuth login from the CLI.
+
+*File*: ~src/main.rs~
+
+*Change*: Add to ~Cli~ struct (after ~debug~ field):
+
+#+begin_src rust
+/// Login to a provider via OAuth (e.g. --login anthropic)
+#[arg(long)]
+login: Option<String>,
+#+end_src
+
+*Change*: In ~main()~, after CLI parsing but before provider creation, handle login:
+
+#+begin_src rust
+// Handle --login flow (runs OAuth and exits)
+if let Some(ref login_provider) = cli.login {
+    // TODO: implement login flow for each provider
+    // This will call run_oauth_flow() and save_token()
+    eprintln!("OAuth login for '{}' is not yet configured.", login_provider);
+    return Ok(());
+}
+#+end_src
+
+*Checklist*:
+- [ ] ~--login <provider>~ CLI argument exists
+- [ ] When ~--login~ is specified, the app runs the login flow and exits
+- [ ] ~cargo build~ succeeds
+
+** TODO Step 7: Export ~oauth~ module
+
+*File*: ~crates/kodo-store/src/lib.rs~
+
+*Change*: Add ~pub mod oauth;~ to the module exports.
+
+*Checklist*:
+- [ ] ~pub mod oauth;~ exists in ~kodo-store/src/lib.rs~
+- [ ] ~cargo build~ succeeds
+- [ ] ~cargo test --workspace~ passes
+
+** TODO Step 8: Final verification
+
+*Checklist*:
+- [ ] ~cargo build~ clean
+- [ ] ~cargo test --workspace~ all pass
+- [ ] ~cargo clippy --workspace~ no warnings
+- [ ] PKCE verifier/challenge generation works
+- [ ] ~resolve_auth()~ falls back correctly: env var -> keychain -> error
+- [ ] ~--login~ CLI arg accepted

@@ -320,7 +320,6 @@ Give the agent the ability to act on the codebase.
 - [X] Implement ~grep_search~ tool
 - [X] Implement ~web_fetch~ tool
 - [X] Wire tool calling into agentic loop (LLM tool_use -> dispatch -> feed result back)
-- [ ] Text-based tool calling fallback (XML/JSON parsing for models without native support)
 - [X] ~kodo-fmt~ crate: formatter registry + runner
 - [X] Hook formatters into file_write / file_edit (silent format, log to UI)
 - [X] Built-in formatters: cargo fmt, gofmt, prettier, ruff
@@ -381,19 +380,6 @@ Give the agent awareness of type errors and diagnostics.
 - [X] Hook into agentic loop: after file edits -> notify LSP -> collect diagnostics -> inject into context
 - [X] ~get_diagnostics~ tool: explicit on-demand diagnostics for the LLM
 - [X] Graceful server lifecycle (start on first relevant file, shutdown on session end)
-
-** Phase 8 — Polish & Future
-
-Refinements and advanced features.
-
-- [ ] Context window management: track token counts, auto-compact when nearing limit
-- [ ] OAuth browser login flows (Anthropic, OpenAI)
-- [ ] Prompt caching (Anthropic)
-- [ ] Subagent support (spawn isolated agent tasks)
-- [ ] MCP server integration
-- [ ] Config file support (YAML + TOML)
-- [ ] Custom LSP servers and formatters via config
-- [ ] Auto-install LSP servers when missing
 
 * References
 
