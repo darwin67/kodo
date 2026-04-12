@@ -1,0 +1,459 @@
+#+TITLE: Config File Support
+#+AUTHOR: Darwin D. Wu
+#+STATUS: TODO
+#+DATE: 2026-04-11
+#+DEPENDS_ON: None
+
+* Motivation
+
+All settings are currently hardcoded or passed via CLI args/env vars. Users need
+a config file to persist preferences: default provider, model, theme, keybinds,
+MCP servers, custom formatters, custom LSP servers, etc.
+
+* Scope
+
+Add config file loading from ~$HOME/.config/kodo/config.toml~ (global) and
+~./kodo.toml~ (project-level, overrides global). Use TOML format — it's
+the Rust ecosystem standard and human-friendly.
+
+* Current State
+
+- Default model: hardcoded ~"claude-sonnet-4-20250514"~ in agent.rs:26.
+- Default provider: hardcoded ~"anthropic"~ in main.rs:78.
+- Theme: defaults to ~Theme::dark()~ in model.rs:127.
+- Keybinds: built from ~KeyBindRegistry::new()~ in model.rs:95.
+- Max tokens: hardcoded ~8192~ in agent.rs:27.
+- LSP servers: hardcoded in kodo-lsp/config.rs ~builtin_configs()~.
+- Formatters: hardcoded in kodo-fmt/registry.rs ~register_builtins()~.
+- No config file loading anywhere.
+
+* Files to Create
+
+| File                             | Purpose                        |
+|----------------------------------+--------------------------------|
+| ~crates/kodo-core/src/config.rs~ | Config structs + loading logic |
+
+* Files to Modify
+
+| File                            | What changes                             |
+|---------------------------------+------------------------------------------|
+| ~crates/kodo-core/src/lib.rs~   | Add ~pub mod config~ export              |
+| ~crates/kodo-core/Cargo.toml~   | Add ~toml~ and ~dirs~ dependencies       |
+| ~crates/kodo-core/src/agent.rs~ | Use config values instead of hardcoded   |
+| ~src/main.rs~                   | Load config, apply to agent and UI model |
+
+* Step-by-step Plan
+
+** TODO Step 1: Add dependencies
+
+*File*: ~crates/kodo-core/Cargo.toml~
+
+*Add*:
+
+#+begin_src toml
+toml = "0.8"
+dirs = "5"
+#+end_src
+
+*Checklist*:
+- [ ] ~toml~ and ~dirs~ added to ~[dependencies]~
+- [ ] ~cargo build -p kodo-core~ succeeds
+
+** TODO Step 2: Define config structs
+
+*What*: Define the configuration schema as Rust structs with serde.
+
+*File*: ~crates/kodo-core/src/config.rs~ (new file)
+
+#+begin_src rust
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use anyhow::Result;
+use serde::Deserialize;
+use tracing::debug;
+
+/// Top-level Kodo configuration.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct KodoConfig {
+    /// Default LLM provider.
+    pub provider: Option<String>,
+    /// Default model name.
+    pub model: Option<String>,
+    /// Max tokens for LLM responses.
+    pub max_tokens: Option<u32>,
+    /// Default mode: "plan" or "build".
+    pub mode: Option<String>,
+    /// Theme: "dark" or "light".
+    pub theme: Option<String>,
+    /// MCP server configurations.
+    pub mcp: Option<McpConfig>,
+    /// Custom LSP server configurations.
+    pub lsp: Option<LspConfig>,
+    /// Custom formatter configurations.
+    pub formatters: Option<FormattersConfig>,
+    /// Keybind overrides.
+    pub keybinds: Option<HashMap<String, String>>,
+}
+
+/// MCP server configuration section.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct McpConfig {
+    /// Map of server name -> server config.
+    pub servers: HashMap<String, McpServerEntry>,
+}
+
+/// A single MCP server entry.
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpServerEntry {
+    /// Command to run the server.
+    pub command: String,
+    /// Arguments to pass to the command.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Environment variables to set.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+/// LSP server configuration section.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct LspConfig {
+    /// Map of server name -> server config.
+    pub servers: HashMap<String, LspServerEntry>,
+}
+
+/// A single custom LSP server entry.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LspServerEntry {
+    /// Command to run the server.
+    pub command: String,
+    /// Arguments to pass to the command.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// File extensions this server handles (without dot).
+    pub extensions: Vec<String>,
+}
+
+/// Formatter configuration section.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct FormattersConfig {
+    /// Map of formatter name -> formatter config.
+    pub formatters: HashMap<String, FormatterEntry>,
+}
+
+/// A single custom formatter entry.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FormatterEntry {
+    /// Command to run. Use $FILE for the file path placeholder.
+    pub command: Vec<String>,
+    /// File extensions this formatter handles (without dot).
+    pub extensions: Vec<String>,
+}
+#+end_src
+
+*Checklist*:
+- [ ] ~KodoConfig~ struct with all fields optional and defaulted
+- [ ] ~McpConfig~ with ~servers: HashMap<String, McpServerEntry>~
+- [ ] ~LspConfig~ with ~servers: HashMap<String, LspServerEntry>~
+- [ ] ~FormattersConfig~ with ~formatters: HashMap<String, FormatterEntry>~
+- [ ] All structs derive ~Deserialize~ and ~Default~ (where appropriate)
+- [ ] ~cargo build -p kodo-core~ succeeds
+
+** TODO Step 3: Implement config file loading
+
+*What*: Load config from global and project-level files, merge them.
+
+*File*: ~crates/kodo-core/src/config.rs~ (append)
+
+#+begin_src rust
+impl KodoConfig {
+    /// Load configuration from global and project-level config files.
+    ///
+    /// Resolution order (later overrides earlier):
+    /// 1. Built-in defaults (all None)
+    /// 2. Global: ~/.config/kodo/config.toml
+    /// 3. Project: ./kodo.toml (in current directory)
+    ///
+    /// CLI args override config file values (handled by the caller).
+    pub fn load() -> Result<Self> {
+        let mut config = Self::default();
+
+        // 1. Load global config
+        if let Some(global_path) = global_config_path() {
+            if global_path.exists() {
+                debug!(path = %global_path.display(), "loading global config");
+                let global = load_file(&global_path)?;
+                config = merge(config, global);
+            }
+        }
+
+        // 2. Load project config
+        let project_path = PathBuf::from("kodo.toml");
+        if project_path.exists() {
+            debug!(path = %project_path.display(), "loading project config");
+            let project = load_file(&project_path)?;
+            config = merge(config, project);
+        }
+
+        Ok(config)
+    }
+}
+
+/// Get the global config file path: ~/.config/kodo/config.toml
+fn global_config_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("kodo").join("config.toml"))
+}
+
+/// Load and parse a single config file.
+fn load_file(path: &Path) -> Result<KodoConfig> {
+    let content = std::fs::read_to_string(path)?;
+    let config: KodoConfig = toml::from_str(&content)?;
+    Ok(config)
+}
+
+/// Merge two configs. Values from `override_cfg` take precedence over `base`.
+fn merge(base: KodoConfig, override_cfg: KodoConfig) -> KodoConfig {
+    KodoConfig {
+        provider: override_cfg.provider.or(base.provider),
+        model: override_cfg.model.or(base.model),
+        max_tokens: override_cfg.max_tokens.or(base.max_tokens),
+        mode: override_cfg.mode.or(base.mode),
+        theme: override_cfg.theme.or(base.theme),
+        mcp: override_cfg.mcp.or(base.mcp),
+        lsp: override_cfg.lsp.or(base.lsp),
+        formatters: override_cfg.formatters.or(base.formatters),
+        keybinds: match (base.keybinds, override_cfg.keybinds) {
+            (Some(mut base_kb), Some(override_kb)) => {
+                base_kb.extend(override_kb);
+                Some(base_kb)
+            }
+            (base_kb, override_kb) => override_kb.or(base_kb),
+        },
+    }
+}
+#+end_src
+
+*Checklist*:
+- [ ] ~KodoConfig::load()~ loads global then project config
+- [ ] Global path is ~$HOME/.config/kodo/config.toml~
+- [ ] Project path is ~./kodo.toml~
+- [ ] ~merge()~ uses project values over global, with global as fallback
+- [ ] Keybinds are merged (not replaced) — project keybinds extend global
+- [ ] Missing files are silently skipped
+- [ ] Invalid TOML returns an error
+- [ ] ~cargo build -p kodo-core~ succeeds
+
+** TODO Step 4: Add tests for config loading
+
+*File*: ~crates/kodo-core/src/config.rs~ (append)
+
+#+begin_src rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_is_all_none() {
+        let config = KodoConfig::default();
+        assert!(config.provider.is_none());
+        assert!(config.model.is_none());
+        assert!(config.max_tokens.is_none());
+        assert!(config.theme.is_none());
+    }
+
+    #[test]
+    fn parse_minimal_toml() {
+        let toml_str = r#"
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+"#;
+        let config: KodoConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.provider, Some("anthropic".into()));
+        assert_eq!(config.model, Some("claude-sonnet-4-20250514".into()));
+    }
+
+    #[test]
+    fn parse_full_toml() {
+        let toml_str = r#"
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+max_tokens = 4096
+mode = "build"
+theme = "dark"
+
+[mcp.servers.filesystem]
+command = "mcp-filesystem"
+args = ["--root", "/home/user"]
+
+[lsp.servers.clangd]
+command = "clangd"
+args = ["--background-index"]
+extensions = ["c", "cpp", "h"]
+
+[formatters.formatters.black]
+command = ["black", "$FILE"]
+extensions = ["py"]
+
+[keybinds]
+"ctrl+p" = "open_palette"
+"ctrl+b" = "toggle_mode"
+"#;
+        let config: KodoConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.provider, Some("anthropic".into()));
+        assert_eq!(config.max_tokens, Some(4096));
+
+        let mcp = config.mcp.unwrap();
+        assert!(mcp.servers.contains_key("filesystem"));
+        assert_eq!(mcp.servers["filesystem"].command, "mcp-filesystem");
+
+        let lsp = config.lsp.unwrap();
+        assert!(lsp.servers.contains_key("clangd"));
+        assert_eq!(lsp.servers["clangd"].extensions, vec!["c", "cpp", "h"]);
+
+        let fmt = config.formatters.unwrap();
+        assert!(fmt.formatters.contains_key("black"));
+
+        let kb = config.keybinds.unwrap();
+        assert_eq!(kb["ctrl+p"], "open_palette");
+    }
+
+    #[test]
+    fn merge_prefers_override() {
+        let base = KodoConfig {
+            provider: Some("anthropic".into()),
+            model: Some("old-model".into()),
+            ..Default::default()
+        };
+        let override_cfg = KodoConfig {
+            model: Some("new-model".into()),
+            ..Default::default()
+        };
+        let merged = merge(base, override_cfg);
+        assert_eq!(merged.provider, Some("anthropic".into())); // from base
+        assert_eq!(merged.model, Some("new-model".into()));    // from override
+    }
+
+    #[test]
+    fn merge_keybinds_extends() {
+        let mut base_kb = HashMap::new();
+        base_kb.insert("ctrl+k".into(), "palette".into());
+
+        let mut override_kb = HashMap::new();
+        override_kb.insert("ctrl+b".into(), "build".into());
+
+        let base = KodoConfig { keybinds: Some(base_kb), ..Default::default() };
+        let over = KodoConfig { keybinds: Some(override_kb), ..Default::default() };
+        let merged = merge(base, over);
+
+        let kb = merged.keybinds.unwrap();
+        assert_eq!(kb.len(), 2);
+        assert_eq!(kb["ctrl+k"], "palette");
+        assert_eq!(kb["ctrl+b"], "build");
+    }
+
+    #[test]
+    fn empty_toml_is_valid() {
+        let config: KodoConfig = toml::from_str("").unwrap();
+        assert!(config.provider.is_none());
+    }
+
+    #[test]
+    fn unknown_keys_are_ignored() {
+        let toml_str = r#"
+provider = "anthropic"
+unknown_field = "should not cause error"
+"#;
+        // This should not error because #[serde(default)] ignores unknown fields
+        // Actually by default serde does ignore unknown fields
+        let result: Result<KodoConfig, _> = toml::from_str(toml_str);
+        assert!(result.is_ok());
+    }
+}
+#+end_src
+
+*Checklist*:
+- [ ] Default config test passes
+- [ ] Minimal TOML parsing test passes
+- [ ] Full TOML parsing test passes
+- [ ] Merge precedence test passes
+- [ ] Keybind merge (extend) test passes
+- [ ] Empty TOML test passes
+- [ ] Unknown keys are ignored (no error)
+- [ ] ~cargo test -p kodo-core~ passes
+
+** TODO Step 5: Export config module
+
+*File*: ~crates/kodo-core/src/lib.rs~
+
+*Change*: Add ~pub mod config;~
+
+*Checklist*:
+- [ ] ~pub mod config;~ in ~lib.rs~
+- [ ] ~cargo build -p kodo-core~ succeeds
+
+** TODO Step 6: Use config in ~main.rs~
+
+*What*: Load config at startup and use it for provider, model, theme defaults.
+
+*File*: ~src/main.rs~
+
+*Change*: After CLI parsing, load config and merge with CLI args:
+
+#+begin_src rust
+use kodo_core::config::KodoConfig;
+
+// In main(), after `let cli = Cli::parse();`:
+
+// Load config file (global + project level)
+let config = KodoConfig::load().unwrap_or_else(|e| {
+    tracing::warn!("failed to load config: {}", e);
+    KodoConfig::default()
+});
+
+// CLI args override config file values
+let provider_name = cli.provider
+    .as_deref()
+    .or(config.provider.as_deref())
+    .unwrap_or("anthropic");
+
+let model = cli.model
+    .or(config.model.clone())
+    .unwrap_or_else(|| default_model(provider_name).to_string());
+
+let theme_name = config.theme.as_deref().unwrap_or("dark");
+#+end_src
+
+*Change*: Apply theme from config when creating the Model:
+
+#+begin_src rust
+model.theme = match theme_name {
+    "light" => kodo_ui::theme::Theme::light(),
+    _ => kodo_ui::theme::Theme::dark(),
+};
+#+end_src
+
+*Checklist*:
+- [ ] ~KodoConfig::load()~ called at startup
+- [ ] Config load failure is a warning, not a crash
+- [ ] CLI ~--provider~ overrides config ~provider~
+- [ ] CLI ~--model~ overrides config ~model~
+- [ ] Config ~theme~ is applied to Model
+- [ ] ~cargo build~ succeeds
+- [ ] ~cargo test --workspace~ passes
+
+** TODO Step 7: Final verification
+
+*Checklist*:
+- [ ] ~cargo build~ clean
+- [ ] ~cargo test --workspace~ all pass
+- [ ] ~cargo clippy --workspace~ no warnings
+- [ ] Empty/missing config files don't crash
+- [ ] Global config at ~$HOME/.config/kodo/config.toml~ is loaded
+- [ ] Project config at ~./kodo.toml~ overrides global
+- [ ] CLI args override config file values
+- [ ] All config fields parse correctly from TOML

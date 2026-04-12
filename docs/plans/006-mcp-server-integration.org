@@ -1,0 +1,700 @@
+#+TITLE: MCP Server Integration
+#+AUTHOR: Darwin D. Wu
+#+STATUS: TODO
+#+DATE: 2026-04-11
+#+DEPENDS_ON: 007-config-file-support (for configuring MCP servers)
+
+* Motivation
+
+The Model Context Protocol (MCP) allows external servers to provide tools,
+resources, and prompts to LLM agents. By integrating MCP, Kodo can be extended
+with community-built tools (databases, APIs, custom integrations) without
+modifying Kodo's source code.
+
+* Scope
+
+Implement an MCP client that connects to external MCP servers over stdio,
+discovers their tools, and makes them available alongside Kodo's built-in tools.
+
+* Current State
+
+- No MCP code or dependencies exist in the codebase.
+- ~ToolRegistry~ (registry.rs) already supports dynamic tool registration via
+  ~register(Arc<dyn Tool>)~.
+- Tools are keyed by name in a ~HashMap~, so MCP tools will need namespacing
+  to avoid collisions (e.g. ~mcp_servername_toolname~).
+
+* Files to Create
+
+| File                                 | Purpose                                |
+|--------------------------------------+----------------------------------------|
+| ~crates/kodo-mcp/Cargo.toml~         | New crate for MCP client               |
+| ~crates/kodo-mcp/src/lib.rs~         | Crate root, exports                    |
+| ~crates/kodo-mcp/src/client.rs~      | MCP client (JSON-RPC over stdio)       |
+| ~crates/kodo-mcp/src/transport.rs~   | Stdio transport for MCP                |
+| ~crates/kodo-mcp/src/types.rs~       | MCP protocol types                     |
+| ~crates/kodo-mcp/src/tool_bridge.rs~ | Adapter: MCP tool -> kodo Tool trait   |
+| ~crates/kodo-mcp/src/manager.rs~     | Manage multiple MCP server connections |
+
+* Files to Modify
+
+| File                            | What changes                          |
+|---------------------------------+---------------------------------------|
+| ~Cargo.toml~ (workspace root)   | Add ~kodo-mcp~ to workspace members   |
+| ~crates/kodo-core/Cargo.toml~   | Add ~kodo-mcp~ dependency             |
+| ~crates/kodo-core/src/agent.rs~ | Register MCP tools at startup         |
+| ~src/main.rs~                   | Initialize MCP manager, pass to agent |
+
+* Step-by-step Plan
+
+** TODO Step 1: Create ~kodo-mcp~ crate scaffold
+
+*What*: Set up the new crate with its Cargo.toml and module structure.
+
+*Action 1*: Create directory ~crates/kodo-mcp/src/~.
+
+*File*: ~crates/kodo-mcp/Cargo.toml~
+
+#+begin_src toml
+[package]
+name = "kodo-mcp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "io-util", "sync", "time"] }
+tracing = "0.1"
+
+# Reuse kodo-tools for Tool trait
+kodo-tools = { path = "../kodo-tools" }
+#+end_src
+
+*File*: ~crates/kodo-mcp/src/lib.rs~
+
+#+begin_src rust
+pub mod client;
+pub mod manager;
+pub mod tool_bridge;
+pub mod transport;
+pub mod types;
+#+end_src
+
+*File*: ~Cargo.toml~ (workspace root)
+
+Add ~"crates/kodo-mcp"~ to ~[workspace] members~ list.
+
+*Checklist*:
+- [ ] ~crates/kodo-mcp/~ directory exists
+- [ ] ~Cargo.toml~ is correct
+- [ ] ~lib.rs~ exports all modules
+- [ ] Workspace root lists ~kodo-mcp~
+- [ ] ~cargo build -p kodo-mcp~ succeeds (with stub modules)
+
+** TODO Step 2: Define MCP protocol types in ~types.rs~
+
+*What*: Define the JSON-RPC and MCP-specific types.
+
+*File*: ~crates/kodo-mcp/src/types.rs~
+
+#+begin_src rust
+use serde::{Deserialize, Serialize};
+
+/// JSON-RPC 2.0 request.
+#[derive(Debug, Serialize)]
+pub struct JsonRpcRequest {
+    pub jsonrpc: String,
+    pub id: u64,
+    pub method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<serde_json::Value>,
+}
+
+impl JsonRpcRequest {
+    pub fn new(id: u64, method: &str, params: Option<serde_json::Value>) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            id,
+            method: method.to_string(),
+            params,
+        }
+    }
+}
+
+/// JSON-RPC 2.0 response.
+#[derive(Debug, Deserialize)]
+pub struct JsonRpcResponse {
+    pub id: Option<u64>,
+    pub result: Option<serde_json::Value>,
+    pub error: Option<JsonRpcError>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct JsonRpcError {
+    pub code: i64,
+    pub message: String,
+}
+
+/// MCP tool definition (from tools/list response).
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpToolDef {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(rename = "inputSchema")]
+    pub input_schema: serde_json::Value,
+}
+
+/// MCP tool call result.
+#[derive(Debug, Deserialize)]
+pub struct McpToolResult {
+    pub content: Vec<McpContent>,
+    #[serde(default)]
+    pub is_error: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpContent {
+    #[serde(rename = "type")]
+    pub content_type: String,
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+/// MCP server capabilities (from initialize response).
+#[derive(Debug, Deserialize, Default)]
+pub struct McpCapabilities {
+    #[serde(default)]
+    pub tools: Option<serde_json::Value>,
+}
+
+/// MCP initialize result.
+#[derive(Debug, Deserialize)]
+pub struct McpInitResult {
+    #[serde(rename = "protocolVersion")]
+    pub protocol_version: String,
+    #[serde(default)]
+    pub capabilities: McpCapabilities,
+    #[serde(rename = "serverInfo")]
+    pub server_info: McpServerInfo,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpServerInfo {
+    pub name: String,
+    #[serde(default)]
+    pub version: Option<String>,
+}
+#+end_src
+
+*Checklist*:
+- [ ] ~JsonRpcRequest~ and ~JsonRpcResponse~ types defined
+- [ ] ~McpToolDef~ matches MCP spec (name, description, inputSchema)
+- [ ] ~McpToolResult~ matches MCP spec (content array, is_error)
+- [ ] ~McpInitResult~ captures protocol_version, capabilities, serverInfo
+- [ ] ~cargo build -p kodo-mcp~ succeeds
+
+** TODO Step 3: Implement stdio transport in ~transport.rs~
+
+*What*: Handle reading/writing JSON-RPC messages over a child process's stdio.
+
+*File*: ~crates/kodo-mcp/src/transport.rs~
+
+#+begin_src rust
+use anyhow::{Result, Context};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout};
+
+use crate::types::{JsonRpcRequest, JsonRpcResponse};
+
+/// Stdio transport for communicating with an MCP server process.
+pub struct StdioTransport {
+    stdin: ChildStdin,
+    reader: BufReader<ChildStdout>,
+}
+
+impl StdioTransport {
+    /// Create a transport from a child process's stdio handles.
+    pub fn new(child: &mut Child) -> Result<Self> {
+        let stdin = child.stdin.take()
+            .context("MCP server process has no stdin")?;
+        let stdout = child.stdout.take()
+            .context("MCP server process has no stdout")?;
+        Ok(Self {
+            stdin,
+            reader: BufReader::new(stdout),
+        })
+    }
+
+    /// Send a JSON-RPC request.
+    pub async fn send(&mut self, request: &JsonRpcRequest) -> Result<()> {
+        let json = serde_json::to_string(request)?;
+        self.stdin.write_all(json.as_bytes()).await?;
+        self.stdin.write_all(b"\n").await?;
+        self.stdin.flush().await?;
+        Ok(())
+    }
+
+    /// Read the next JSON-RPC response.
+    pub async fn recv(&mut self) -> Result<JsonRpcResponse> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let bytes_read = self.reader.read_line(&mut line).await?;
+            if bytes_read == 0 {
+                anyhow::bail!("MCP server closed connection");
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue; // skip blank lines
+            }
+            let response: JsonRpcResponse = serde_json::from_str(trimmed)
+                .context("failed to parse MCP server response")?;
+            return Ok(response);
+        }
+    }
+}
+#+end_src
+
+*Checklist*:
+- [ ] ~StdioTransport~ wraps child process stdin/stdout
+- [ ] ~send()~ writes JSON + newline to stdin
+- [ ] ~recv()~ reads a line from stdout and parses as JSON-RPC
+- [ ] Handles blank lines gracefully
+- [ ] ~cargo build -p kodo-mcp~ succeeds
+
+** TODO Step 4: Implement MCP client in ~client.rs~
+
+*What*: Connect to an MCP server, initialize, discover tools, call tools.
+
+*File*: ~crates/kodo-mcp/src/client.rs~
+
+#+begin_src rust
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use anyhow::{Result, Context, bail};
+use tokio::process::{Child, Command};
+use tracing::debug;
+
+use crate::transport::StdioTransport;
+use crate::types::*;
+
+/// MCP client for a single server.
+pub struct McpClient {
+    transport: StdioTransport,
+    child: Child,
+    next_id: AtomicU64,
+    pub server_name: String,
+    pub tools: Vec<McpToolDef>,
+}
+
+impl McpClient {
+    /// Start an MCP server process and connect to it.
+    pub async fn start(command: &str, args: &[String]) -> Result<Self> {
+        debug!(command, ?args, "starting MCP server");
+
+        let mut child = Command::new(command)
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to start MCP server: {}", command))?;
+
+        let transport = StdioTransport::new(&mut child)?;
+
+        let mut client = Self {
+            transport,
+            child,
+            next_id: AtomicU64::new(1),
+            server_name: String::new(),
+            tools: Vec::new(),
+        };
+
+        client.initialize().await?;
+        client.discover_tools().await?;
+
+        Ok(client)
+    }
+
+    fn next_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Send a request and wait for the response.
+    async fn request(
+        &mut self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        let id = self.next_id();
+        let req = JsonRpcRequest::new(id, method, params);
+        self.transport.send(&req).await?;
+        let resp = self.transport.recv().await?;
+
+        if let Some(err) = resp.error {
+            bail!("MCP error ({}): {}", err.code, err.message);
+        }
+
+        resp.result.context("MCP response missing result")
+    }
+
+    /// Initialize the MCP connection.
+    async fn initialize(&mut self) -> Result<()> {
+        let params = serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "kodo",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        });
+
+        let result = self.request("initialize", Some(params)).await?;
+        let init: McpInitResult = serde_json::from_value(result)?;
+        self.server_name = init.server_info.name;
+
+        debug!(
+            server = %self.server_name,
+            version = ?init.server_info.version,
+            protocol = %init.protocol_version,
+            "MCP server initialized"
+        );
+
+        // Send initialized notification (no response expected)
+        let notif = JsonRpcRequest::new(self.next_id(), "notifications/initialized", None);
+        self.transport.send(&notif).await?;
+
+        Ok(())
+    }
+
+    /// Discover available tools from the server.
+    async fn discover_tools(&mut self) -> Result<()> {
+        let result = self.request("tools/list", None).await?;
+
+        #[derive(serde::Deserialize)]
+        struct ToolsListResult {
+            tools: Vec<McpToolDef>,
+        }
+
+        let list: ToolsListResult = serde_json::from_value(result)?;
+        debug!(count = list.tools.len(), "discovered MCP tools");
+        self.tools = list.tools;
+        Ok(())
+    }
+
+    /// Call a tool on the MCP server.
+    pub async fn call_tool(
+        &mut self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<McpToolResult> {
+        let params = serde_json::json!({
+            "name": name,
+            "arguments": arguments
+        });
+
+        let result = self.request("tools/call", Some(params)).await?;
+        let tool_result: McpToolResult = serde_json::from_value(result)?;
+        Ok(tool_result)
+    }
+
+    /// Shut down the MCP server.
+    pub async fn shutdown(&mut self) {
+        let _ = self.request("shutdown", None).await;
+        let _ = self.child.kill().await;
+    }
+}
+#+end_src
+
+*Checklist*:
+- [ ] ~McpClient::start()~ spawns process, initializes, discovers tools
+- [ ] ~initialize()~ sends MCP initialize request with client info
+- [ ] ~discover_tools()~ calls ~tools/list~ and stores tool definitions
+- [ ] ~call_tool()~ sends ~tools/call~ and returns ~McpToolResult~
+- [ ] ~shutdown()~ sends shutdown request and kills process
+- [ ] ~cargo build -p kodo-mcp~ succeeds
+
+** TODO Step 5: Implement tool bridge in ~tool_bridge.rs~
+
+*What*: Adapt an MCP tool to Kodo's ~Tool~ trait so it can be registered.
+
+*File*: ~crates/kodo-mcp/src/tool_bridge.rs~
+
+#+begin_src rust
+use std::sync::Arc;
+use anyhow::Result;
+use tokio::sync::Mutex;
+
+use kodo_tools::tool::{PermissionLevel, Tool, ToolContext, ToolOutput};
+use crate::client::McpClient;
+use crate::types::McpToolDef;
+
+/// Wraps an MCP tool as a kodo Tool.
+/// All MCP tools are assigned Execute permission (external process).
+pub struct McpToolBridge {
+    /// Namespaced tool name: mcp_{server}_{tool}
+    namespaced_name: String,
+    /// Original tool name (for MCP calls)
+    original_name: String,
+    description: String,
+    input_schema: serde_json::Value,
+    client: Arc<Mutex<McpClient>>,
+}
+
+impl McpToolBridge {
+    pub fn new(
+        server_name: &str,
+        tool_def: &McpToolDef,
+        client: Arc<Mutex<McpClient>>,
+    ) -> Self {
+        Self {
+            namespaced_name: format!("mcp_{}_{}", server_name, tool_def.name),
+            original_name: tool_def.name.clone(),
+            description: tool_def.description.clone().unwrap_or_default(),
+            input_schema: tool_def.input_schema.clone(),
+            client,
+        }
+    }
+}
+
+impl Tool for McpToolBridge {
+    fn name(&self) -> &str {
+        &self.namespaced_name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        self.input_schema.clone()
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Execute
+    }
+
+    fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolOutput>> + Send + '_>> {
+        let client = Arc::clone(&self.client);
+        let tool_name = self.original_name.clone();
+
+        Box::pin(async move {
+            let mut client = client.lock().await;
+            let result = client.call_tool(&tool_name, params).await?;
+
+            let content = result.content.iter()
+                .filter_map(|c| c.text.as_deref())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            Ok(ToolOutput {
+                content,
+                success: !result.is_error,
+            })
+        })
+    }
+}
+#+end_src
+
+*Checklist*:
+- [ ] ~McpToolBridge~ implements ~Tool~ trait
+- [ ] Tool name is namespaced as ~mcp_{server}_{tool}~
+- [ ] ~execute()~ calls ~client.call_tool()~ with the original tool name
+- [ ] Result text content is extracted and returned as ~ToolOutput~
+- [ ] ~is_error~ from MCP maps to ~success~ in ~ToolOutput~
+- [ ] Permission level is ~Execute~
+- [ ] ~cargo build -p kodo-mcp~ succeeds
+
+** TODO Step 6: Implement ~McpManager~ in ~manager.rs~
+
+*What*: Manage multiple MCP server connections and register their tools.
+
+*File*: ~crates/kodo-mcp/src/manager.rs~
+
+#+begin_src rust
+use std::sync::Arc;
+use anyhow::Result;
+use tokio::sync::Mutex;
+use tracing::debug;
+
+use kodo_tools::registry::ToolRegistry;
+use crate::client::McpClient;
+use crate::tool_bridge::McpToolBridge;
+
+/// Configuration for an MCP server to connect to.
+#[derive(Debug, Clone)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+/// Manages connections to multiple MCP servers.
+pub struct McpManager {
+    clients: Vec<Arc<Mutex<McpClient>>>,
+}
+
+impl McpManager {
+    pub fn new() -> Self {
+        Self {
+            clients: Vec::new(),
+        }
+    }
+
+    /// Connect to an MCP server and register its tools.
+    pub async fn connect(
+        &mut self,
+        config: &McpServerConfig,
+        registry: &mut ToolRegistry,
+    ) -> Result<()> {
+        debug!(name = %config.name, command = %config.command, "connecting to MCP server");
+
+        let client = McpClient::start(&config.command, &config.args).await?;
+        let tools = client.tools.clone();
+        let server_name = client.server_name.clone();
+        let client = Arc::new(Mutex::new(client));
+
+        for tool_def in &tools {
+            let bridge = McpToolBridge::new(&server_name, tool_def, Arc::clone(&client));
+            registry.register(Arc::new(bridge));
+            debug!(
+                tool = format!("mcp_{}_{}", server_name, tool_def.name),
+                "registered MCP tool"
+            );
+        }
+
+        self.clients.push(client);
+        Ok(())
+    }
+
+    /// Shut down all connected MCP servers.
+    pub async fn shutdown_all(&mut self) {
+        for client in &self.clients {
+            let mut client = client.lock().await;
+            client.shutdown().await;
+        }
+        self.clients.clear();
+    }
+}
+
+impl Default for McpManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+#+end_src
+
+*Checklist*:
+- [ ] ~McpServerConfig~ has ~name~, ~command~, ~args~
+- [ ] ~McpManager::connect()~ starts the server and registers its tools
+- [ ] Tools are namespaced as ~mcp_{servername}_{toolname}~
+- [ ] ~shutdown_all()~ shuts down all servers
+- [ ] ~cargo build -p kodo-mcp~ succeeds
+
+** TODO Step 7: Wire MCP into the agent
+
+*What*: Initialize MCP servers at startup and register tools.
+
+*File*: ~crates/kodo-core/Cargo.toml~
+
+Add: ~kodo-mcp = { path = "../kodo-mcp" }~
+
+*File*: ~crates/kodo-core/src/agent.rs~
+
+*Change*: Add ~mcp_manager~ field to ~Agent~:
+
+#+begin_src rust
+use kodo_mcp::manager::McpManager;
+
+pub struct Agent {
+    // ... existing fields ...
+    mcp_manager: McpManager,
+}
+#+end_src
+
+*Change*: Initialize in ~Agent::new()~:
+
+#+begin_src rust
+mcp_manager: McpManager::new(),
+#+end_src
+
+*Change*: Add method to connect MCP servers:
+
+#+begin_src rust
+pub async fn connect_mcp_server(&mut self, config: &kodo_mcp::manager::McpServerConfig) -> Result<()> {
+    self.mcp_manager.connect(config, &mut self.tool_registry).await
+}
+#+end_src
+
+*Change*: Update ~shutdown_lsp()~ to also shut down MCP:
+
+#+begin_src rust
+pub async fn shutdown(&mut self) {
+    self.lsp_manager.shutdown_all().await;
+    self.mcp_manager.shutdown_all().await;
+}
+#+end_src
+
+*Checklist*:
+- [ ] ~Agent~ has ~mcp_manager: McpManager~ field
+- [ ] ~connect_mcp_server()~ method exists
+- [ ] Shutdown cleans up both LSP and MCP servers
+- [ ] ~cargo build --workspace~ succeeds
+
+** TODO Step 8: Tests
+
+*File*: ~crates/kodo-mcp/src/types.rs~
+
+#+begin_src rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_rpc_request_serializes() {
+        let req = JsonRpcRequest::new(1, "initialize", None);
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"jsonrpc\":\"2.0\""));
+        assert!(json.contains("\"method\":\"initialize\""));
+    }
+
+    #[test]
+    fn mcp_tool_def_deserializes() {
+        let json = r#"{"name":"read_file","description":"Read a file","inputSchema":{"type":"object"}}"#;
+        let def: McpToolDef = serde_json::from_str(json).unwrap();
+        assert_eq!(def.name, "read_file");
+        assert_eq!(def.description, Some("Read a file".into()));
+    }
+
+    #[test]
+    fn mcp_tool_result_deserializes() {
+        let json = r#"{"content":[{"type":"text","text":"hello"}],"isError":false}"#;
+        let result: McpToolResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.content.len(), 1);
+        assert!(!result.is_error);
+    }
+}
+#+end_src
+
+*Checklist*:
+- [ ] JSON-RPC request serialization test passes
+- [ ] MCP tool definition deserialization test passes
+- [ ] MCP tool result deserialization test passes
+- [ ] ~cargo test --workspace~ passes
+
+** TODO Step 9: Final verification
+
+*Checklist*:
+- [ ] ~cargo build~ clean
+- [ ] ~cargo test --workspace~ all pass
+- [ ] ~cargo clippy --workspace~ no warnings
+- [ ] ~kodo-mcp~ crate compiles independently
+- [ ] MCP tools appear with ~mcp_~ prefix in tool definitions
+- [ ] MCP tools are gated behind ~Execute~ permission

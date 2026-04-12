@@ -21,3 +21,4 @@ rust-project.json
 
 ## nix
 /.direnv/
+/.claude/

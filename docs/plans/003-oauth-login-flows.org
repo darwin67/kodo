@@ -1,0 +1,430 @@
+#+TITLE: Provider Authentication Flows
+#+AUTHOR: Darwin D. Wu
+#+STATUS: TODO
+#+DATE: 2026-04-11
+#+DEPENDS_ON: None
+
+* Motivation
+
+Auth currently requires manually setting environment variables
+(~ANTHROPIC_API_KEY~, ~OPENAI_API_KEY~, etc.). This is friction for new users
+and doesn't support token refresh. This plan removes the env var requirement
+entirely — credentials are stored in the OS keychain and obtained via the
+~--login~ flow.
+
+* Scope
+
+Implement per-provider auth strategies:
+- *OpenAI*: OAuth2 Authorization Code + PKCE (matching the flow Codex CLI uses).
+- *Anthropic*: API key only (keychain -> prompt via ~--login~). Anthropic does
+  not expose a public OAuth flow for direct API access.
+- *Gemini*: API key via ~--login gemini~ prompt, stored in keychain.
+
+A unified ~resolve_auth()~ chain handles: keychain (with refresh if supported)
+-> error with instructions to run ~--login~.
+
+* Provider Auth Matrix
+
+| Provider  | Auth Method        | OAuth Support | Token Refresh          | Header Format                   |
+|-----------+--------------------+---------------+------------------------+---------------------------------|
+| OpenAI    | OAuth (PKCE)       | Yes           | Yes                    | ~Authorization: Bearer <token>~ |
+| Anthropic | API key (keychain) | No            | No (keys don't expire) | ~x-api-key: <key>~              |
+| Gemini    | API key (keychain) | No            | No                     | ~x-goog-api-key: <key>~         |
+
+* Current State
+
+- Providers use ~from_env()~ to read env vars (anthropic.rs:237, openai, gemini).
+- ~kodo-store/auth.rs~ has ~AuthToken~ struct with ~token~, ~refresh_token~,
+  ~expires_at~. Secrets go to OS keychain via ~keyring~ crate.
+- ~auth_providers~ table in SQLite stores only provider name + expiry.
+- No OAuth client, no browser flow, no token refresh.
+
+* Files to Create
+
+| File                                            | Purpose                                   |
+|-------------------------------------------------+-------------------------------------------|
+| ~crates/kodo-store/src/oauth.rs~                | OAuth client, PKCE, local callback server |
+| ~crates/kodo-store/migrations/002_accounts.sql~ | Multi-account schema migration            |
+
+* Files to Modify
+
+| File                               | What changes                                                   |
+|------------------------------------+----------------------------------------------------------------|
+| ~crates/kodo-store/src/lib.rs~     | Add ~pub mod oauth~ export                                     |
+| ~crates/kodo-store/src/auth.rs~    | Multi-account structs, ~refresh_if_needed()~, ~resolve_auth()~ |
+| ~crates/kodo-store/src/db.rs~      | Include new migration file                                     |
+| ~crates/kodo-store/Cargo.toml~     | Add ~hyper~, ~open~, ~sha2~, ~base64~ deps                     |
+| ~crates/kodo-llm/src/openai.rs~    | Use ~resolve_auth(account_id)~ with token refresh              |
+| ~crates/kodo-llm/src/anthropic.rs~ | Use ~resolve_auth(account_id)~                                 |
+| ~crates/kodo-llm/src/gemini.rs~    | Use ~resolve_auth(account_id)~                                 |
+| ~src/main.rs~                      | Update ~--login~ to create accounts, add ~--name~              |
+
+Note: in-app provider management is handled via slash commands — see plan 009.
+
+* Reference: Codex CLI OAuth Flow
+
+The Codex CLI (https://github.com/openai/codex) implements OAuth2 Authorization
+Code + PKCE against OpenAI's auth infrastructure. We replicate this flow for
+our OpenAI provider.
+
+** Key Constants
+
+- *Issuer*: ~https://auth.openai.com~
+- *Client ID*: ~app_EMoamEEZ73f0CkXaXp7hrann~ (public client, no secret)
+- *Authorize URL*: ~https://auth.openai.com/oauth/authorize~
+- *Token URL*: ~https://auth.openai.com/oauth/token~
+- *Scopes*: ~openid profile email offline_access~
+- *PKCE*: S256, 64-byte random verifier, base64url-encoded (no padding)
+
+** Authorization Code Flow (primary)
+
+1. Start local HTTP server on a random port.
+2. Build authorize URL with ~response_type=code~, ~client_id~, ~redirect_uri~,
+   ~scope~, ~code_challenge~ (S256), ~code_challenge_method=S256~, ~state~.
+3. Open user's browser to authorize URL.
+4. Receive callback at ~/auth/callback~ with ~code~ and ~state~ params.
+5. Exchange code for tokens via POST to token URL:
+   #+begin_src text
+   grant_type=authorization_code
+   code={authorization_code}
+   redirect_uri={redirect_uri}
+   client_id={client_id}
+   code_verifier={pkce_verifier}
+   #+end_src
+6. Response contains: ~id_token~, ~access_token~, ~refresh_token~.
+
+** API Key Exchange (post-login)
+
+After obtaining tokens, Codex performs a second token exchange (RFC 8693) to
+get an actual OpenAI API key:
+
+#+begin_src text
+POST https://auth.openai.com/oauth/token
+grant_type=urn:ietf:params:oauth:grant-type:token-exchange
+client_id={client_id}
+requested_token=openai-api-key
+subject_token={id_token}
+subject_token_type=urn:ietf:params:oauth:token-type:id_token
+#+end_src
+
+Response: ~{ access_token }~ — this is the API key used for subsequent requests.
+
+** Token Refresh
+
+#+begin_src text
+POST https://auth.openai.com/oauth/token
+Content-Type: application/json
+{
+  "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+  "grant_type": "refresh_token",
+  "refresh_token": "{refresh_token}"
+}
+#+end_src
+
+Codex proactively refreshes when the access token is within 8 minutes of expiry.
+
+** Device Code Flow (headless fallback)
+
+For SSH/headless environments where a browser can't be opened locally:
+
+1. POST to ~{issuer}/api/accounts/deviceauth/usercode~ with ~{ client_id }~
+   → returns ~{ device_auth_id, user_code, interval }~.
+2. Display: "Go to https://auth.openai.com/codex/device and enter code: {user_code}".
+3. Poll ~{issuer}/api/accounts/deviceauth/token~ with ~{ device_auth_id, user_code }~
+   every ~interval~ seconds (15 min timeout).
+4. On success: returns ~{ authorization_code, code_challenge, code_verifier }~.
+5. Exchange code using the same token endpoint.
+
+* Reference: Gemini API Auth
+
+- HTTP header: ~x-goog-api-key: {key}~.
+- Obtain at https://aistudio.google.com/app/apikey.
+- No expiry, no refresh needed.
+- Sufficient for all generation endpoints.
+
+* Step-by-step Plan
+
+** TODO Step 1: Add dependencies to ~kodo-store/Cargo.toml~
+
+*What*: Add crates needed for the OAuth flow.
+
+*File*: ~crates/kodo-store/Cargo.toml~
+
+Add to ~[dependencies]~: ~hyper~ (server + http1 features), ~hyper-util~
+(tokio), ~http-body-util~, ~open~, ~sha2~, ~base64~, ~rand~, ~url~, ~chrono~
+(serde feature).
+
+*Checklist*:
+- [ ] All dependencies added to ~[dependencies]~ in ~kodo-store/Cargo.toml~
+- [ ] ~cargo build -p kodo-store~ succeeds
+
+** TODO Step 2: Create ~oauth.rs~ — PKCE utilities
+
+*What*: Implement PKCE code_verifier, code_challenge, and state generation.
+Matches the Codex approach: 64-byte random verifier, S256 challenge.
+
+*File*: ~crates/kodo-store/src/oauth.rs~ (new file)
+
+- ~generate_code_verifier()~ → 64 random bytes, URL-safe base64 no-pad
+- ~code_challenge(verifier)~ → ~base64url(sha256(verifier))~
+- ~generate_state()~ → 32 random bytes, URL-safe base64 no-pad
+
+*Tests*: verifier length ≥ 43 chars; challenge is deterministic and differs
+from verifier; state is non-empty.
+
+*Checklist*:
+- [ ] ~oauth.rs~ file created at ~crates/kodo-store/src/oauth.rs~
+- [ ] ~generate_code_verifier()~ returns 64 random bytes, URL-safe base64
+- [ ] ~code_challenge()~ returns ~base64url(sha256(verifier))~
+- [ ] ~generate_state()~ returns 32 random bytes, URL-safe base64
+- [ ] Tests pass
+- [ ] ~cargo test -p kodo-store~ passes
+
+** TODO Step 3: Add provider OAuth config and callback server
+
+*What*: Add ~ProviderOAuthConfig~ enum, ~OAuthTokens~ struct, and a local HTTP
+callback server. Only OpenAI has a full OAuth config.
+
+*File*: ~crates/kodo-store/src/oauth.rs~ (append)
+
+- ~ProviderOAuthConfig~ enum: ~OpenAI { issuer, client_id }~ variant.
+  ~openai_default()~ returns Codex-compatible constants.
+- ~OAuthTokens~ struct: ~access_token~, ~refresh_token~, ~id_token~, ~expires_in~.
+- ~run_openai_oauth_flow(config)~:
+  1. Generate verifier/challenge/state
+  2. Bind TCP listener on random port, build authorize URL
+  3. Open browser; fall back to printing URL if that fails
+  4. ~wait_for_callback(listener)~ → ~(code, state)~ with 120s timeout
+  5. Verify returned state matches; bail on mismatch
+  6. ~exchange_code_openai(...)~ → ~OAuthTokens~
+  7. ~exchange_for_api_key(issuer, client_id, id_token)~ → API key string
+  8. Return ~OAuthTokens~ with API key as ~access_token~
+- ~wait_for_callback~: hyper HTTP/1 server; parse ~?code=&state=~ from first
+  request; respond "Login successful!"; timeout after 120s.
+- ~exchange_code_openai~: POST form-encoded to ~/oauth/token~; deserialize
+  ~{ access_token, refresh_token, id_token, expires_in }~.
+- ~exchange_for_api_key~: RFC 8693 token exchange POST; return ~access_token~.
+
+*Checklist*:
+- [ ] ~ProviderOAuthConfig~ enum exists with ~OpenAI~ variant
+- [ ] ~openai_default()~ returns Codex-compatible config
+- [ ] ~run_openai_oauth_flow()~ starts local server, opens browser, waits for callback,
+      exchanges code, then exchanges id_token for API key
+- [ ] CSRF protection via ~state~ parameter
+- [ ] Timeout of 120 seconds on callback wait
+- [ ] ~cargo build -p kodo-store~ succeeds
+
+** TODO Step 4: Add ~refresh_if_needed()~ to ~auth.rs~
+
+*What*: Check token expiry and refresh if needed. Only applies to OAuth tokens
+(OpenAI); API keys (Anthropic, Gemini) never expire.
+
+*File*: ~crates/kodo-store/src/auth.rs~
+
+~refresh_if_needed(pool, store, account_id, token_url, client_id)~:
+1. Load account from keychain; return ~None~ if not found.
+2. If no ~expires_at~: return token as-is (API key, never expires).
+3. If expires more than 8 minutes from now: return token as-is.
+4. If expired and no ~refresh_token~: return ~None~.
+5. POST refresh to ~token_url~:
+   - OpenAI: JSON body ~{ client_id, grant_type: "refresh_token", refresh_token }~
+   - Standard: form-encoded same fields
+6. On success: if OpenAI and response has ~id_token~, re-exchange for API key.
+7. Compute new ~expires_at~ from ~expires_in~; call ~update_token()~; return new token.
+
+*Checklist*:
+- [ ] ~refresh_if_needed()~ function exists in ~auth.rs~
+- [ ] Returns existing token if not expired
+- [ ] Returns existing token if no expiry is set (API keys)
+- [ ] Refreshes token if expired/near-expiry and refresh_token exists
+- [ ] Uses JSON body for OpenAI refresh (matching Codex CLI)
+- [ ] After OpenAI refresh, re-exchanges id_token for API key
+- [ ] Returns ~None~ if expired with no refresh_token
+- [ ] Updated token is saved to keychain + DB
+- [ ] ~cargo build -p kodo-store~ succeeds
+
+** TODO Step 5: Add ~resolve_auth()~ function
+
+*What*: Unified auth resolution keyed on ~account_id~. Checks keychain only;
+no env var fallback. OpenAI accounts get token refresh; others do not.
+
+*File*: ~crates/kodo-store/src/auth.rs~
+
+~resolve_auth(pool, store, account_id)~:
+1. Load account; if ~provider_kind == "openai"~ call ~refresh_if_needed()~,
+   else call ~get_account()~ and return ~token~.
+2. If nothing found: bail with ~"No credentials for {kind}. Run: kodo --login {kind}"~.
+
+*Checklist*:
+- [ ] ~resolve_auth()~ handles OpenAI, Anthropic, Gemini
+- [ ] OpenAI: keychain w/ refresh -> error w/ login instructions
+- [ ] Anthropic: keychain -> error w/ login instructions
+- [ ] Gemini: keychain -> error w/ login instructions
+- [ ] No environment variable checks anywhere in the chain
+- [ ] Error messages direct the user to ~kodo --login <provider>~
+- [ ] ~cargo build -p kodo-store~ succeeds
+
+** TODO Step 6: Add ~--login~ CLI argument
+
+*What*: Allow users to trigger login from the CLI. OpenAI runs OAuth;
+Anthropic/Gemini prompt for an API key (saved to keychain).
+
+*File*: ~src/main.rs~
+
+Add ~login: Option<String>~ arg to ~Cli~.
+
+In ~main()~: match on provider string → run OAuth flow or prompt for key →
+call ~save_token()~ → print confirmation → early return.
+
+*Checklist*:
+- [ ] ~--login openai~ runs full OAuth flow and saves tokens
+- [ ] ~--login anthropic~ prompts for API key and saves to keychain
+- [ ] ~--login gemini~ prompts for API key and saves to keychain
+- [ ] Unknown providers print an error
+- [ ] ~cargo build~ succeeds
+
+** TODO Step 7: Update provider implementations
+
+*What*: Replace ~from_env()~ with ~resolve_auth(account_id)~ in each LLM provider.
+The ~account_id~ comes from the active session/thread configuration.
+
+- ~openai.rs~: ~resolve_auth(account_id)~ → ~Authorization: Bearer {token}~
+- ~anthropic.rs~: ~resolve_auth(account_id)~ → ~x-api-key: {token}~
+- ~gemini.rs~: ~resolve_auth(account_id)~ → ~x-goog-api-key: {token}~
+
+*Checklist*:
+- [ ] All three providers use ~resolve_auth()~ (no ~from_env()~ calls remain)
+- [ ] Each provider uses the correct header format
+- [ ] ~cargo build~ succeeds
+
+** TODO Step 8: Export ~oauth~ module
+
+*File*: ~crates/kodo-store/src/lib.rs~
+
+Add ~pub mod oauth;~.
+
+*Checklist*:
+- [ ] ~pub mod oauth;~ exists in ~kodo-store/src/lib.rs~
+- [ ] ~cargo build~ succeeds
+
+** TODO Step 9: Final verification (OAuth + keychain)
+
+*Checklist*:
+- [ ] ~cargo build~ clean
+- [ ] ~cargo test --workspace~ all pass
+- [ ] ~cargo clippy --workspace~ no warnings
+- [ ] PKCE verifier/challenge generation works
+- [ ] OpenAI: ~--login openai~ opens browser, completes OAuth, saves API key
+- [ ] Anthropic: ~--login anthropic~ prompts for key, saves to keychain
+- [ ] Gemini: ~--login gemini~ prompts for key, saves to keychain
+- [ ] ~resolve_auth()~ resolves from keychain only (no env var fallback)
+- [ ] ~--login~ CLI arg accepted
+
+** TODO Step 10: DB migration for multi-account support
+
+*What*: Replace the single-row-per-provider ~auth_providers~ table with
+~auth_accounts~, where each row is one account. The primary key becomes a
+UUIDv7 account ID. The keychain key changes from ~provider~ to ~account_id~.
+
+*File*: ~crates/kodo-store/migrations/002_accounts.sql~ (new file)
+
+- Rename ~auth_providers~ to ~auth_accounts_old~.
+- Create ~auth_accounts~ with columns: ~id~ (UUIDv7 PK), ~provider_kind~,
+  ~name~ (nullable), ~selected_model~ (nullable), ~expires_at~, ~updated_at~.
+- Index on ~provider_kind~.
+- Migrate rows from ~auth_accounts_old~ with randomly-generated IDs.
+- Drop ~auth_accounts_old~.
+
+*File*: ~crates/kodo-store/src/db.rs~
+
+Change ~MIGRATIONS_SQL~ from a single ~&str~ to a ~&[&str]~ slice including
+both migration files; apply each in order.
+
+*Note on keychain migration*: Existing keychain entries used ~provider~ as the
+service key. The migration can't move them automatically — users re-run ~--login~
+for existing accounts, or a one-time startup migration reads old keys and
+re-saves under the new account ID.
+
+*Checklist*:
+- [ ] ~002_accounts.sql~ exists and is included in migrations
+- [ ] ~auth_accounts~ table has ~id~, ~provider_kind~, ~name~, ~selected_model~, ~expires_at~, ~updated_at~
+- [ ] Old ~auth_providers~ rows are migrated to ~auth_accounts~
+- [ ] Index on ~provider_kind~ exists
+- [ ] ~cargo build -p kodo-store~ succeeds
+- [ ] ~cargo test -p kodo-store~ passes (update DB tests to check new table)
+
+** TODO Step 11: Refactor ~auth.rs~ for multi-account
+
+*What*: Replace the provider-keyed API with an account-ID-keyed API.
+~AuthToken~ becomes ~AuthAccount~ with identity and display fields.
+
+*File*: ~crates/kodo-store/src/auth.rs~
+
+Structs:
+- ~AuthAccount~: ~id~, ~provider_kind~, ~name: Option<String>~,
+  ~selected_model: Option<String>~, ~token~, ~refresh_token~, ~expires_at~
+
+Functions (all keyed on ~account_id~ instead of ~provider~):
+- ~create_account(pool, store, provider_kind, name, token, refresh_token, expires_at)~ → new UUIDv7 id
+- ~get_account(pool, store, account_id)~ → ~Option<AuthAccount>~
+- ~list_accounts(pool, store, provider_kind: Option)~ → ~Vec<AuthAccount>~
+- ~update_account(pool, account_id, name, selected_model)~ → DB-only update
+- ~delete_account(pool, store, account_id)~ → removes keychain + DB row
+- ~update_token(pool, store, account_id, token, refresh_token, expires_at)~ → keychain + DB
+- ~resolve_auth(pool, store, account_id)~ → token string; refreshes if OpenAI
+
+Remove old ~save_token~ / ~get_token~ / ~list_providers~.
+
+*Checklist*:
+- [ ] ~AuthAccount~ struct has all fields above
+- [ ] ~create_account()~ generates UUIDv7 ID, saves to keychain + DB
+- [ ] ~update_account()~ updates name and/or selected_model in DB only
+- [ ] ~get_account()~ retrieves from DB + keychain
+- [ ] ~list_accounts()~ supports ~provider_kind~ filter
+- [ ] ~delete_account()~ cleans up keychain + DB
+- [ ] ~update_token()~ updates keychain + DB expiry
+- [ ] ~resolve_auth(account_id)~ resolves token, refreshes if needed (OpenAI)
+- [ ] Old ~save_token~ / ~get_token~ / ~list_providers~ removed or deprecated
+- [ ] All existing tests updated for new API
+- [ ] ~cargo test -p kodo-store~ passes
+
+** TODO Step 12: Update ~--login~ for multi-account
+
+*What*: ~--login <provider>~ always creates a new account (not upsert).
+~--name <label>~ stores a display name on the new account.
+
+*File*: ~src/main.rs~
+
+Add ~name: Option<String>~ arg to ~Cli~ alongside ~login~.
+
+Login handler: acquire ~(token, refresh_token, expires_at)~ via OAuth or key
+prompt → call ~create_account()~ with ~cli.name~ → print ~"Account '{name}'
+created (id: {id})"~ → early return.
+
+*Checklist*:
+- [ ] ~--login openai~ creates a new account and prints its ID
+- [ ] ~--login anthropic~ / ~--login gemini~ prompts for API key, creates account
+- [ ] ~--name <label>~ stores custom name on the new account
+- [ ] Multiple ~--login openai~ calls create separate accounts (not upsert)
+- [ ] ~cargo build~ succeeds
+
+** TODO Step 13: Final verification (multi-account)
+
+*Checklist*:
+- [ ] ~cargo build~ clean
+- [ ] ~cargo test --workspace~ all pass
+- [ ] ~cargo clippy --workspace~ no warnings
+- [ ] ~--login openai --name "Work"~ creates an account labeled "Work"
+- [ ] ~--login anthropic --name "Personal"~ creates a second Anthropic account
+- [ ] Two accounts of same provider can coexist in DB
+- [ ] ~resolve_auth(account_id)~ returns the correct token for each account
+
+* Future Work
+
+- *OpenAI Device Code flow*: For headless/SSH environments where a browser
+  can't open on the same machine. Uses ~/api/accounts/deviceauth/usercode~.
+- *Gemini OAuth*: If we need tuning or semantic retrieval, add loopback OAuth
+  flow against ~accounts.google.com~ with ~generative-language.tuning~ scope.
+  Requires registering a Google Cloud "Desktop app" OAuth client.
+- *In-app management*: ~/login~, ~/logout~, ~/providers~, ~/model~ slash
+  commands (plan 009) provide the in-app UX for account and model management.
