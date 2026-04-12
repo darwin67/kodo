@@ -45,7 +45,6 @@ A unified ~resolve_auth()~ chain handles: keychain (with refresh if supported)
 |-------------------------------------------------+-------------------------------------------|
 | ~crates/kodo-store/src/oauth.rs~                | OAuth client, PKCE, local callback server |
 | ~crates/kodo-store/migrations/002_accounts.sql~ | Multi-account schema migration            |
-| ~crates/kodo-ui/src/provider_modal.rs~          | Provider manager modal state + rendering  |
 
 * Files to Modify
 
@@ -59,9 +58,8 @@ A unified ~resolve_auth()~ chain handles: keychain (with refresh if supported)
 | ~crates/kodo-llm/src/anthropic.rs~ | Use ~resolve_auth(account_id)~                                 |
 | ~crates/kodo-llm/src/gemini.rs~    | Use ~resolve_auth(account_id)~                                 |
 | ~src/main.rs~                      | Update ~--login~ to create accounts, add ~--name~              |
-| ~crates/kodo-ui/src/model.rs~      | Add provider manager modal state                               |
-| ~crates/kodo-ui/src/message.rs~    | Add palette commands for provider manager                      |
-| ~crates/kodo-ui/src/update.rs~     | Handle provider manager modal messages                         |
+
+Note: in-app provider management is handled via slash commands — see plan 009.
 
 * Reference: Codex CLI OAuth Flow
 
@@ -410,105 +408,7 @@ created (id: {id})"~ → early return.
 - [ ] Multiple ~--login openai~ calls create separate accounts (not upsert)
 - [ ] ~cargo build~ succeeds
 
-** TODO Step 13: Available models registry
-
-*What*: Static list of known models per provider for the UI model picker.
-
-*File*: ~crates/kodo-llm/src/models.rs~ (new file)
-
-- ~ModelInfo~ struct: ~id~, ~display_name~, ~context_k: u32~
-- ~available_models(provider_kind: &str) -> &'static [ModelInfo]~:
-  - ~"openai"~: gpt-4o, gpt-4o-mini, o3, o4-mini
-  - ~"anthropic"~: claude-opus-4-5, claude-sonnet-4-5, claude-haiku-4-5
-  - ~"gemini"~: gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash
-  - unknown → empty slice
-
-Export ~ModelInfo~ and ~available_models~ from ~kodo-llm/src/lib.rs~.
-
-*Checklist*:
-- [ ] ~ModelInfo~ struct exists with ~id~, ~display_name~, ~context_k~
-- [ ] ~available_models("openai")~ returns at least 4 entries
-- [ ] ~available_models("anthropic")~ returns at least 3 entries
-- [ ] ~available_models("gemini")~ returns at least 3 entries
-- [ ] ~available_models("unknown")~ returns empty slice (no panic)
-- [ ] ~cargo build -p kodo-llm~ succeeds
-
-** TODO Step 14: Provider manager modal — model state
-
-*What*: Add modal state to ~Model~ driving a multi-step flow:
-account list → select provider kind → enter name → model picker.
-
-*File*: ~crates/kodo-ui/src/model.rs~ (or ~provider_modal.rs~)
-
-Add to ~Model~: ~provider_modal_open: bool~, ~provider_modal: Option<ProviderModalState>~.
-
-New types:
-- ~AccountSummary~: ~id~, ~provider_kind~, ~name: Option<String>~,
-  ~selected_model: Option<String>~
-- ~ProviderModalStep~ enum:
-  - ~AccountList~
-  - ~SelectProviderKind { selected: usize }~
-  - ~EnterName { provider_kind, input: String }~
-  - ~ModelPicker { account_id, provider_kind, selected: usize }~
-- ~ProviderModalState~: ~accounts: Vec<AccountSummary>~, ~selected: usize~,
-  ~step: ProviderModalStep~
-
-*Checklist*:
-- [ ] ~provider_modal_open~ and ~provider_modal~ fields added to ~Model~
-- [ ] ~AccountSummary~, ~ProviderModalStep~, ~ProviderModalState~ types defined
-- [ ] ~Model::new()~ initializes ~provider_modal_open = false~, ~provider_modal = None~
-- [ ] ~cargo build -p kodo-ui~ succeeds
-
-** TODO Step 15: Provider manager modal — messages and update handlers
-
-*What*: Wire the modal to the palette, keyboard nav, and backend calls.
-
-*File*: ~crates/kodo-ui/src/message.rs~
-
-Add to ~Msg~:
-- ~ProviderModalOpen~, ~ProviderModalClose~
-- ~ProviderModalNav(i32)~ — ±1 to move selection
-- ~ProviderModalConfirm~ — Enter on current item
-- ~ProviderModalDelete~ — delete selected account
-- ~ProviderModalSetModel { account_id, model_id }~
-- ~ProviderModalSetName { account_id, name }~
-- ~ProviderAccountsLoaded(Vec<AccountSummary>)~
-- ~ProviderAccountCreated(AccountSummary)~
-
-*File*: ~crates/kodo-ui/src/update.rs~
-
-Handle each variant:
-- ~Open~: set open flag, load accounts from backend, step = ~AccountList~
-- ~AccountsLoaded~: populate ~modal.accounts~
-- ~Nav~: adjust ~selected~ with wrap
-- ~Confirm~ on ~AccountList~: "Add account" item → ~SelectProviderKind~;
-  existing account → ~ModelPicker~
-- ~Confirm~ on ~SelectProviderKind~: advance to ~EnterName~
-- ~Confirm~ on ~EnterName~: dispatch ~AppCmd::LoginProvider~; on response →
-  ~ProviderAccountCreated~
-- ~Confirm~ on ~ModelPicker~: dispatch ~ProviderModalSetModel~
-- ~SetModel~: call ~update_account()~, refresh list
-- ~Delete~: call ~delete_account()~, refresh list
-- ~Close~ / Escape: close modal, clear state
-
-Palette entries: "Manage providers" → ~Open~; "Connect provider" →
-~Open~ skipping straight to ~SelectProviderKind~.
-
-*Checklist*:
-- [ ] All ~Msg~ variants above exist
-- [ ] ~update.rs~ handles all variants without panicking
-- [ ] Opening the modal loads and displays current accounts
-- [ ] Arrow keys navigate the list; Enter selects; Escape closes
-- [ ] "Add account" entry in account list opens ~SelectProviderKind~
-- [ ] Selecting a provider kind advances to ~EnterName~
-- [ ] After account creation the list refreshes
-- [ ] Selecting an existing account opens ~ModelPicker~
-- [ ] Confirming a model calls ~update_account()~ and refreshes
-- [ ] Delete removes the account and refreshes list
-- [ ] Palette commands "Manage providers" and "Connect provider" work
-- [ ] ~cargo build~ succeeds
-
-** TODO Step 16: Final verification (multi-account + modal)
+** TODO Step 13: Final verification (multi-account)
 
 *Checklist*:
 - [ ] ~cargo build~ clean
@@ -518,12 +418,6 @@ Palette entries: "Manage providers" → ~Open~; "Connect provider" →
 - [ ] ~--login anthropic --name "Personal"~ creates a second Anthropic account
 - [ ] Two accounts of same provider can coexist in DB
 - [ ] ~resolve_auth(account_id)~ returns the correct token for each account
-- [ ] Provider manager modal opens from palette
-- [ ] Account list shows all connected accounts with names/kinds
-- [ ] "Add account" flow completes and new account appears in list
-- [ ] Model picker shows correct models for each provider kind
-- [ ] Selecting a model persists via ~update_account()~ and shows in status bar
-- [ ] Deleting an account removes it from DB and keychain
 
 * Future Work
 
@@ -532,4 +426,5 @@ Palette entries: "Manage providers" → ~Open~; "Connect provider" →
 - *Gemini OAuth*: If we need tuning or semantic retrieval, add loopback OAuth
   flow against ~accounts.google.com~ with ~generative-language.tuning~ scope.
   Requires registering a Google Cloud "Desktop app" OAuth client.
-- *Token status display*: Show token expiry per account in the provider manager.
+- *In-app management*: ~/login~, ~/logout~, ~/providers~, ~/model~ slash
+  commands (plan 009) provide the in-app UX for account and model management.

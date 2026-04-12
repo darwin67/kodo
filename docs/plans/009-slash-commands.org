@@ -1,0 +1,268 @@
+#+TITLE: Slash Commands
+#+AUTHOR: Darwin D. Wu
+#+STATUS: TODO
+#+DATE: 2026-04-12
+#+DEPENDS_ON: 003-oauth-login-flows
+
+* Motivation
+
+Provider and model management currently has no in-app interface — users must
+restart with CLI flags. A slash command system (like Claude Code's ~/model~,
+~/clear~, etc.) lets users manage accounts, switch models, and control the
+session without leaving the input prompt.
+
+* Scope
+
+When the user types ~/~ at the start of the input buffer, kodo enters slash
+command mode: an autocomplete list appears above the input, narrows as the user
+types, and the selected command executes on Enter. Escape or backspace-to-empty
+cancels back to normal input.
+
+Built-in commands:
+
+| Command                    | Effect                                      |
+|----------------------------+---------------------------------------------|
+| ~/help~                    | Print all available commands                |
+| ~/clear~                   | Clear conversation history                  |
+| ~/compact~                 | Summarise context and replace messages      |
+| ~/model [id]~              | Show current model, or switch to ~id~       |
+| ~/providers~               | List all connected accounts                 |
+| ~/login <provider> [name]~ | Add a new account (OAuth or API key prompt) |
+| ~/logout <account_id>~     | Remove an account from keychain + DB        |
+
+* Current State
+
+- Input is a plain text buffer; no special handling of leading ~/~.
+- ~command.rs~ has a ~PaletteCommand~ list used for the ~Ctrl+P~ palette.
+- No slash command parser, no inline autocomplete.
+
+* Files to Create
+
+| File                          | Purpose                              |
+|-------------------------------+--------------------------------------|
+| ~crates/kodo-ui/src/slash.rs~ | Parser, command registry, completion |
+
+* Files to Modify
+
+| File                             | What changes                                       |
+|----------------------------------+----------------------------------------------------|
+| ~crates/kodo-ui/src/model.rs~    | Add ~slash_state: Option<SlashState>~ to ~Model~   |
+| ~crates/kodo-ui/src/message.rs~  | Add slash command ~Msg~ variants                   |
+| ~crates/kodo-ui/src/update.rs~   | Route slash input; dispatch command side-effects   |
+| ~crates/kodo-ui/src/lib.rs~      | Export ~slash~ module                              |
+
+* Step-by-step Plan
+
+** TODO Step 1: Available models registry
+
+*What*: Static list of known models per provider, used by ~/model~ completion
+and by the slash execute handler.
+
+*File*: ~crates/kodo-llm/src/models.rs~ (new file)
+
+- ~ModelInfo~ struct: ~id~, ~display_name~, ~context_k: u32~
+- ~available_models(provider_kind: &str) -> &'static [ModelInfo]~:
+  - ~"openai"~: gpt-4o, gpt-4o-mini, o3, o4-mini
+  - ~"anthropic"~: claude-opus-4-5, claude-sonnet-4-5, claude-haiku-4-5
+  - ~"gemini"~: gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash
+  - unknown → empty slice
+
+Export from ~kodo-llm/src/lib.rs~.
+
+*Checklist*:
+- [ ] ~ModelInfo~ struct exists with ~id~, ~display_name~, ~context_k~
+- [ ] ~available_models("openai")~ returns at least 4 entries
+- [ ] ~available_models("anthropic")~ returns at least 3 entries
+- [ ] ~available_models("gemini")~ returns at least 3 entries
+- [ ] ~available_models("unknown")~ returns empty slice (no panic)
+- [ ] ~cargo build -p kodo-llm~ succeeds
+
+** TODO Step 3: Command registry
+
+*What*: A static list of ~SlashCommand~ descriptors — name, arg spec, one-line
+description. Used for autocomplete and help output.
+
+*File*: ~crates/kodo-ui/src/slash.rs~ (new file)
+
+- ~SlashCommand~ struct: ~name: &'static str~, ~args: &'static str~ (display
+  hint, e.g. ~"[id]"~), ~description: &'static str~
+- ~COMMANDS: &[SlashCommand]~ — all built-ins listed above
+- ~complete(prefix: &str) -> Vec<&'static SlashCommand>~ — filter commands
+  whose name starts with ~prefix~ (case-insensitive)
+
+*Checklist*:
+- [ ] ~SlashCommand~ struct defined
+- [ ] ~COMMANDS~ slice has all 7 built-in commands
+- [ ] ~complete("")~ returns all commands
+- [ ] ~complete("mo")~ returns only ~/model~
+- [ ] ~complete("lo")~ returns ~/login~ and ~/logout~
+- [ ] ~cargo build -p kodo-ui~ succeeds
+
+** TODO Step 4: Slash command parser
+
+*What*: Parse a raw input string (after the leading ~/~) into a ~ParsedSlash~
+with a command name and argument tokens.
+
+*File*: ~crates/kodo-ui/src/slash.rs~ (append)
+
+- ~ParsedSlash~ struct: ~name: String~, ~args: Vec<String>~
+- ~parse(input: &str) -> ParsedSlash~ — splits on whitespace; first token is
+  name (without ~/~), rest are args
+- ~is_slash_input(input: &str) -> bool~ — true iff input starts with ~/~ and
+  cursor is at beginning of input (no preceding text)
+
+*Checklist*:
+- [ ] ~parse("/model gpt-4o")~ → ~{ name: "model", args: ["gpt-4o"] }~
+- [ ] ~parse("/login openai Work")~ → ~{ name: "login", args: ["openai", "Work"] }~
+- [ ] ~parse("/help")~ → ~{ name: "help", args: [] }~
+- [ ] ~is_slash_input("/m")~ → true
+- [ ] ~is_slash_input("hello /no")~ → false (slash not at position 0)
+- [ ] ~cargo test -p kodo-ui~ passes
+
+** TODO Step 5: Slash UI state
+
+*What*: Track whether slash mode is active, the filtered completion list, and
+the selected index.
+
+*File*: ~crates/kodo-ui/src/model.rs~
+
+Add to ~Model~:
+
+- ~slash_state: Option<SlashState>~
+
+New type in ~slash.rs~:
+
+- ~SlashState~: ~completions: Vec<&'static SlashCommand>~, ~selected: usize~
+
+Activation logic (in ~update.rs~, on each keystroke):
+- If ~is_slash_input(input)~: set ~slash_state~ with filtered completions.
+- If input no longer starts with ~/~: clear ~slash_state~.
+
+*Checklist*:
+- [ ] ~SlashState~ struct defined
+- [ ] ~Model~ has ~slash_state: Option<SlashState>~
+- [ ] Typing ~/~ opens slash mode with all completions
+- [ ] Typing ~/mo~ narrows to ~/model~
+- [ ] Deleting back past ~/~ clears slash state
+- [ ] ~cargo build -p kodo-ui~ succeeds
+
+** TODO Step 6: Slash command messages
+
+*What*: Msg variants for navigating the completion list and executing a command.
+
+*File*: ~crates/kodo-ui/src/message.rs~
+
+Add to ~Msg~:
+- ~SlashNav(i32)~ — ±1 to move selection (Tab / arrow keys in slash mode)
+- ~SlashExecute~ — Enter in slash mode: run selected/typed command
+- ~SlashCancel~ — Escape in slash mode: return to normal input
+
+*Checklist*:
+- [ ] All three variants exist in ~Msg~
+- [ ] ~cargo build -p kodo-ui~ succeeds
+
+** TODO Step 7: Update handler — navigation and dispatch
+
+*What*: Handle slash ~Msg~ variants in ~update.rs~ and route to command logic.
+
+*File*: ~crates/kodo-ui/src/update.rs~
+
+- ~SlashNav~: adjust ~slash_state.selected~ with wrap.
+- ~SlashCancel~: clear ~slash_state~; leave input unchanged.
+- ~SlashExecute~:
+  1. Parse the current input with ~slash::parse()~.
+  2. Clear input and ~slash_state~.
+  3. Match on ~name~:
+     - ~"help"~ → append help text to messages
+     - ~"clear"~ → clear ~model.messages~
+     - ~"compact"~ → dispatch ~AppCmd::CompactContext~
+     - ~"model"~ with arg → dispatch ~AppCmd::SetModel(id)~; without arg →
+       append current model info to messages
+     - ~"providers"~ → dispatch ~AppCmd::ListProviders~; result arrives as
+       ~Msg::ProvidersListed(accounts)~ → append formatted list to messages
+     - ~"login"~ → dispatch ~AppCmd::LoginProvider { provider, name }~; result
+       arrives as ~Msg::LoginComplete(account)~ → append confirmation message
+     - ~"logout"~ → dispatch ~AppCmd::LogoutProvider(account_id)~; result
+       arrives as ~Msg::LogoutComplete(account_id)~ → append confirmation
+     - unknown command → append error message
+
+Also intercept Enter key in ~update.rs~: if ~slash_state.is_some()~, dispatch
+~SlashExecute~ instead of sending the input as a chat message.
+
+*Checklist*:
+- [ ] ~SlashNav~ wraps selection correctly
+- [ ] ~SlashCancel~ clears state without clearing input
+- [ ] ~SlashExecute~ clears input before dispatching
+- [ ] ~/help~ appends formatted command list to messages
+- [ ] ~/clear~ clears message history
+- [ ] ~/model~ without arg appends current model to messages
+- [ ] ~/model gpt-4o~ dispatches ~SetModel~
+- [ ] ~/providers~ dispatches ~ListProviders~ and formats result
+- [ ] ~/login openai~ dispatches ~LoginProvider~
+- [ ] ~/logout <id>~ dispatches ~LogoutProvider~
+- [ ] Unknown command appends error message
+- [ ] Enter in slash mode executes instead of submitting chat
+- [ ] ~cargo build~ succeeds
+
+** TODO Step 8: Keybind wiring
+
+*What*: Tab and arrow keys navigate completions while slash mode is active.
+
+*File*: ~crates/kodo-ui/src/update.rs~ (or ~keybinds.rs~)
+
+While ~slash_state.is_some()~:
+- ~Tab~ / ~↓~ → ~SlashNav(+1)~
+- ~Shift+Tab~ / ~↑~ → ~SlashNav(-1)~
+- ~Escape~ → ~SlashCancel~
+- ~Enter~ → ~SlashExecute~
+
+These intercept before the normal input keybind handling.
+
+*Checklist*:
+- [ ] Tab cycles down completions
+- [ ] Shift+Tab cycles up
+- [ ] Escape cancels slash mode
+- [ ] Enter executes in slash mode
+- [ ] Normal typing still filters completions
+- [ ] ~cargo build~ succeeds
+
+** TODO Step 9: Rendering — inline completion list
+
+*What*: Draw the completion list above the input bar when ~slash_state~ is set.
+Follows the same visual style as the existing command palette.
+
+*File*: wherever the input area is rendered (likely ~message.rs~ or a view module)
+
+- Render up to 7 completion rows above the input.
+- Each row: ~/name args~  ~description~
+- Highlight the selected row.
+- If only one match, show it pre-highlighted.
+
+*Checklist*:
+- [ ] Completion list appears on ~/~ keystroke
+- [ ] List narrows as more characters are typed
+- [ ] Selected item is visually highlighted
+- [ ] List disappears on cancel or execute
+- [ ] At most 7 items shown (scroll if more)
+- [ ] ~cargo build~ succeeds
+
+** TODO Step 10: Final verification
+
+*Checklist*:
+- [ ] ~cargo build~ clean
+- [ ] ~cargo test --workspace~ all pass
+- [ ] ~cargo clippy --workspace~ no warnings
+- [ ] ~/help~ lists all 7 commands
+- [ ] ~/clear~ empties the chat
+- [ ] ~/model~ shows current model; ~/model gpt-4o~ switches it
+- [ ] ~/providers~ lists connected accounts
+- [ ] ~/login anthropic MyKey~ adds an account
+- [ ] ~/logout <id>~ removes the account
+- [ ] Tab/Shift+Tab navigate completions
+- [ ] Escape cancels without submitting
+
+* Future Work
+
+- *Custom slash commands*: let users define ~/~ commands in ~kodo.toml~.
+- *Argument completion*: after ~/model~, complete against ~available_models()~.
+- *History*: ~/~ re-opens last slash command for re-execution.
