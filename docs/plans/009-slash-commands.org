@@ -53,7 +53,7 @@ Built-in commands:
 
 * Step-by-step Plan
 
-** TODO Step 1: Available models registry
+** DONE Step 1: Available models registry
 
 *What*: Static list of known models per provider, used by ~/model~ completion
 and by the slash execute handler.
@@ -70,14 +70,14 @@ and by the slash execute handler.
 Export from ~kodo-llm/src/lib.rs~.
 
 *Checklist*:
-- [ ] ~ModelInfo~ struct exists with ~id~, ~display_name~, ~context_k~
-- [ ] ~available_models("openai")~ returns at least 4 entries
-- [ ] ~available_models("anthropic")~ returns at least 3 entries
-- [ ] ~available_models("gemini")~ returns at least 3 entries
-- [ ] ~available_models("unknown")~ returns empty slice (no panic)
-- [ ] ~cargo build -p kodo-llm~ succeeds
+- [X] ~ModelInfo~ struct exists with ~id~, ~display_name~, ~context_k~
+- [X] ~available_models("openai")~ returns at least 4 entries
+- [X] ~available_models("anthropic")~ returns at least 3 entries
+- [X] ~available_models("gemini")~ returns at least 3 entries
+- [X] ~available_models("unknown")~ returns empty slice (no panic)
+- [X] ~cargo build -p kodo-llm~ succeeds
 
-** TODO Step 3: Command registry
+** DONE Step 3: Command registry
 
 *What*: A static list of ~SlashCommand~ descriptors — name, arg spec, one-line
 description. Used for autocomplete and help output.
@@ -91,14 +91,14 @@ description. Used for autocomplete and help output.
   whose name starts with ~prefix~ (case-insensitive)
 
 *Checklist*:
-- [ ] ~SlashCommand~ struct defined
-- [ ] ~COMMANDS~ slice has all 7 built-in commands
-- [ ] ~complete("")~ returns all commands
-- [ ] ~complete("mo")~ returns only ~/model~
-- [ ] ~complete("lo")~ returns ~/login~ and ~/logout~
-- [ ] ~cargo build -p kodo-ui~ succeeds
+- [X] ~SlashCommand~ struct defined
+- [X] ~COMMANDS~ slice has all 7 built-in commands
+- [X] ~complete("")~ returns all commands
+- [X] ~complete("mo")~ returns only ~/model~
+- [X] ~complete("lo")~ returns ~/login~ and ~/logout~
+- [X] ~cargo build -p kodo-ui~ succeeds
 
-** TODO Step 4: Slash command parser
+** DONE Step 4: Slash command parser
 
 *What*: Parse a raw input string (after the leading ~/~) into a ~ParsedSlash~
 with a command name and argument tokens.
@@ -112,14 +112,14 @@ with a command name and argument tokens.
   cursor is at beginning of input (no preceding text)
 
 *Checklist*:
-- [ ] ~parse("/model gpt-4o")~ → ~{ name: "model", args: ["gpt-4o"] }~
-- [ ] ~parse("/login openai Work")~ → ~{ name: "login", args: ["openai", "Work"] }~
-- [ ] ~parse("/help")~ → ~{ name: "help", args: [] }~
-- [ ] ~is_slash_input("/m")~ → true
-- [ ] ~is_slash_input("hello /no")~ → false (slash not at position 0)
-- [ ] ~cargo test -p kodo-ui~ passes
+- [X] ~parse("/model gpt-4o")~ → ~{ name: "model", args: ["gpt-4o"] }~
+- [X] ~parse("/login openai Work")~ → ~{ name: "login", args: ["openai", "Work"] }~
+- [X] ~parse("/help")~ → ~{ name: "help", args: [] }~
+- [X] ~is_slash_input("/m")~ → true
+- [X] ~is_slash_input("hello /no")~ → false (slash not at position 0)
+- [X] ~cargo test -p kodo-ui~ passes
 
-** TODO Step 5: Slash UI state
+** DONE Step 5: Slash UI state
 
 *What*: Track whether slash mode is active, the filtered completion list, and
 the selected index.
@@ -139,14 +139,14 @@ Activation logic (in ~update.rs~, on each keystroke):
 - If input no longer starts with ~/~: clear ~slash_state~.
 
 *Checklist*:
-- [ ] ~SlashState~ struct defined
-- [ ] ~Model~ has ~slash_state: Option<SlashState>~
-- [ ] Typing ~/~ opens slash mode with all completions
-- [ ] Typing ~/mo~ narrows to ~/model~
-- [ ] Deleting back past ~/~ clears slash state
-- [ ] ~cargo build -p kodo-ui~ succeeds
+- [X] ~SlashState~ struct defined
+- [X] ~Model~ has ~slash_state: Option<SlashState>~
+- [X] Typing ~/~ opens slash mode with all completions
+- [X] Typing ~/mo~ narrows to ~/model~
+- [X] Deleting back past ~/~ clears slash state
+- [X] ~cargo build -p kodo-ui~ succeeds
 
-** TODO Step 6: Slash command messages
+** DONE Step 6: Slash command messages
 
 *What*: Msg variants for navigating the completion list and executing a command.
 
@@ -158,8 +158,8 @@ Add to ~Msg~:
 - ~SlashCancel~ — Escape in slash mode: return to normal input
 
 *Checklist*:
-- [ ] All three variants exist in ~Msg~
-- [ ] ~cargo build -p kodo-ui~ succeeds
+- [X] All three variants exist in ~Msg~
+- [X] ~cargo build -p kodo-ui~ succeeds
 
 ** TODO Step 7: Update handler — navigation and dispatch
 
@@ -190,21 +190,21 @@ Also intercept Enter key in ~update.rs~: if ~slash_state.is_some()~, dispatch
 ~SlashExecute~ instead of sending the input as a chat message.
 
 *Checklist*:
-- [ ] ~SlashNav~ wraps selection correctly
-- [ ] ~SlashCancel~ clears state without clearing input
-- [ ] ~SlashExecute~ clears input before dispatching
-- [ ] ~/help~ appends formatted command list to messages
-- [ ] ~/clear~ clears message history
-- [ ] ~/model~ without arg appends current model to messages
-- [ ] ~/model gpt-4o~ dispatches ~SetModel~
-- [ ] ~/providers~ dispatches ~ListProviders~ and formats result
+- [X] ~SlashNav~ wraps selection correctly
+- [X] ~SlashCancel~ clears state without clearing input
+- [X] ~SlashExecute~ clears input before dispatching
+- [X] ~/help~ appends formatted command list to messages
+- [X] ~/clear~ clears message history
+- [X] ~/model~ without arg appends current model to messages
+- [X] ~/model gpt-4o~ dispatches ~SetModel~
+- [X] ~/providers~ dispatches ~ListProviders~ and formats result
 - [ ] ~/login openai~ dispatches ~LoginProvider~
-- [ ] ~/logout <id>~ dispatches ~LogoutProvider~
-- [ ] Unknown command appends error message
-- [ ] Enter in slash mode executes instead of submitting chat
-- [ ] ~cargo build~ succeeds
+- [X] ~/logout <id>~ dispatches ~LogoutProvider~
+- [X] Unknown command appends error message
+- [X] Enter in slash mode executes instead of submitting chat
+- [X] ~cargo build~ succeeds
 
-** TODO Step 8: Keybind wiring
+** DONE Step 8: Keybind wiring
 
 *What*: Tab and arrow keys navigate completions while slash mode is active.
 
@@ -219,14 +219,14 @@ While ~slash_state.is_some()~:
 These intercept before the normal input keybind handling.
 
 *Checklist*:
-- [ ] Tab cycles down completions
-- [ ] Shift+Tab cycles up
-- [ ] Escape cancels slash mode
-- [ ] Enter executes in slash mode
-- [ ] Normal typing still filters completions
-- [ ] ~cargo build~ succeeds
+- [X] Tab cycles down completions
+- [X] Shift+Tab cycles up
+- [X] Escape cancels slash mode
+- [X] Enter executes in slash mode
+- [X] Normal typing still filters completions
+- [X] ~cargo build~ succeeds
 
-** TODO Step 9: Rendering — inline completion list
+** DONE Step 9: Rendering — inline completion list
 
 *What*: Draw the completion list above the input bar when ~slash_state~ is set.
 Follows the same visual style as the existing command palette.
@@ -239,27 +239,27 @@ Follows the same visual style as the existing command palette.
 - If only one match, show it pre-highlighted.
 
 *Checklist*:
-- [ ] Completion list appears on ~/~ keystroke
-- [ ] List narrows as more characters are typed
-- [ ] Selected item is visually highlighted
-- [ ] List disappears on cancel or execute
-- [ ] At most 7 items shown (scroll if more)
-- [ ] ~cargo build~ succeeds
+- [X] Completion list appears on ~/~ keystroke
+- [X] List narrows as more characters are typed
+- [X] Selected item is visually highlighted
+- [X] List disappears on cancel or execute
+- [X] At most 7 items shown (scroll if more)
+- [X] ~cargo build~ succeeds
 
 ** TODO Step 10: Final verification
 
 *Checklist*:
-- [ ] ~cargo build~ clean
-- [ ] ~cargo test --workspace~ all pass
-- [ ] ~cargo clippy --workspace~ no warnings
-- [ ] ~/help~ lists all 7 commands
-- [ ] ~/clear~ empties the chat
-- [ ] ~/model~ shows current model; ~/model gpt-4o~ switches it
-- [ ] ~/providers~ lists connected accounts
+- [X] ~cargo build~ clean
+- [X] ~cargo test --workspace~ all pass
+- [X] ~cargo clippy --workspace~ no warnings
+- [X] ~/help~ lists all 7 commands
+- [X] ~/clear~ empties the chat
+- [X] ~/model~ shows current model; ~/model gpt-4o~ switches it
+- [X] ~/providers~ lists connected accounts
 - [ ] ~/login anthropic MyKey~ adds an account
-- [ ] ~/logout <id>~ removes the account
-- [ ] Tab/Shift+Tab navigate completions
-- [ ] Escape cancels without submitting
+- [X] ~/logout <id>~ removes the account
+- [X] Tab/Shift+Tab navigate completions
+- [X] Escape cancels without submitting
 
 * Future Work
 
