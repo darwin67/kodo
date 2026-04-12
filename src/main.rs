@@ -11,6 +11,9 @@ use kodo_llm::gemini::GeminiProvider;
 use kodo_llm::ollama::OllamaProvider;
 use kodo_llm::openai::OpenAiProvider;
 use kodo_llm::provider::Provider;
+use kodo_store::auth;
+use kodo_store::crypto::KeychainStore;
+use kodo_store::db;
 use kodo_ui::command::Command;
 use kodo_ui::event::{EventHandler, map_event};
 use kodo_ui::message::Message;
@@ -59,6 +62,10 @@ fn default_model(provider_name: &str) -> &str {
 #[derive(Debug)]
 enum AgentRequest {
     ProcessMessage(String),
+    ClearConversation,
+    SetModel(String),
+    ListProviders,
+    LogoutProvider(String),
     Quit,
 }
 
@@ -117,6 +124,30 @@ async fn main() -> Result<()> {
                     }
                     // Always send Done so the TUI knows processing finished
                     let _ = agent_event_tx.send(AgentEvent::Done);
+                }
+                AgentRequest::ClearConversation => {
+                    agent.clear_conversation();
+                }
+                AgentRequest::SetModel(model) => {
+                    agent.set_model(model);
+                }
+                AgentRequest::ListProviders => match load_configured_providers().await {
+                    Ok(providers) => {
+                        let _ = agent_event_tx.send(AgentEvent::ProvidersListed(providers));
+                    }
+                    Err(error) => {
+                        let _ = agent_event_tx.send(AgentEvent::Error(format!("{error:#}")));
+                    }
+                },
+                AgentRequest::LogoutProvider(account_id) => {
+                    match logout_provider(&account_id).await {
+                        Ok(()) => {
+                            let _ = agent_event_tx.send(AgentEvent::LogoutComplete(account_id));
+                        }
+                        Err(error) => {
+                            let _ = agent_event_tx.send(AgentEvent::Error(format!("{error:#}")));
+                        }
+                    }
                 }
                 AgentRequest::Quit => {
                     agent.shutdown_lsp().await;
@@ -184,6 +215,18 @@ async fn execute_command(command: Command, req_tx: &mpsc::UnboundedSender<AgentR
         Command::SendToAgent(message) => {
             let _ = req_tx.send(AgentRequest::ProcessMessage(message));
         }
+        Command::ClearConversation => {
+            let _ = req_tx.send(AgentRequest::ClearConversation);
+        }
+        Command::SetModel(model) => {
+            let _ = req_tx.send(AgentRequest::SetModel(model));
+        }
+        Command::ListProviders => {
+            let _ = req_tx.send(AgentRequest::ListProviders);
+        }
+        Command::LogoutProvider(account_id) => {
+            let _ = req_tx.send(AgentRequest::LogoutProvider(account_id));
+        }
         Command::Quit => {
             let _ = req_tx.send(AgentRequest::Quit);
         }
@@ -207,6 +250,20 @@ fn map_agent_event(event: AgentEvent) -> Message {
         AgentEvent::Formatted { message } => Message::AgentFormatted { message },
         AgentEvent::Diagnostics { summary, count } => Message::AgentDiagnostics { summary, count },
         AgentEvent::Error(error) => Message::AgentError(error),
+        AgentEvent::Notice(message) => Message::Notice(message),
+        AgentEvent::ProvidersListed(providers) => Message::ProvidersListed(providers),
+        AgentEvent::LogoutComplete(account_id) => Message::LogoutComplete(account_id),
         AgentEvent::Done => Message::AgentDone,
     }
+}
+
+async fn load_configured_providers() -> Result<Vec<String>> {
+    let pool = db::open(&db::default_db_path()).await?;
+    auth::list_providers(&pool).await
+}
+
+async fn logout_provider(account_id: &str) -> Result<()> {
+    let pool = db::open(&db::default_db_path()).await?;
+    let store = KeychainStore;
+    auth::delete_token(&pool, &store, account_id).await
 }

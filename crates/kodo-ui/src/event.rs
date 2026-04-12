@@ -24,7 +24,6 @@ pub enum Event {
 /// Event handler that polls crossterm events on a background thread.
 pub struct EventHandler {
     rx: mpsc::UnboundedReceiver<Event>,
-    // Keep the handle alive so the task doesn't get dropped.
     _tx: mpsc::UnboundedSender<Event>,
 }
 
@@ -34,14 +33,11 @@ impl EventHandler {
         let (tx, rx) = mpsc::unbounded_channel();
         let _tx = tx.clone();
 
-        // Spawn a blocking thread for crossterm event polling.
-        // crossterm::event::poll is blocking and can't be used with tokio directly.
         std::thread::spawn(move || {
             loop {
                 if event::poll(tick_rate).unwrap_or(false) {
                     match event::read() {
                         Ok(CrosstermEvent::Key(key)) => {
-                            // Only handle key press events (not release/repeat).
                             if key.kind == KeyEventKind::Press && tx.send(Event::Key(key)).is_err()
                             {
                                 break;
@@ -54,11 +50,8 @@ impl EventHandler {
                         }
                         _ => {}
                     }
-                } else {
-                    // No event within tick_rate — send a tick.
-                    if tx.send(Event::Tick).is_err() {
-                        break;
-                    }
+                } else if tx.send(Event::Tick).is_err() {
+                    break;
                 }
             }
         });
@@ -76,12 +69,6 @@ impl EventHandler {
 }
 
 /// Map crossterm events to application Messages following the Elm Architecture.
-///
-/// This function is context-aware - it reads the current model state to decide
-/// which Message to produce. For example, key presses are handled differently
-/// when the command palette is open vs. when typing in the input field.
-///
-/// Returns None for events that should be ignored in the current state.
 pub fn map_event(event: &Event, model: &Model) -> Option<Message> {
     match event {
         Event::Key(key_event) => map_key_event(key_event, model),
@@ -90,58 +77,52 @@ pub fn map_event(event: &Event, model: &Model) -> Option<Message> {
     }
 }
 
-/// Map keyboard input to Messages based on current application state
+/// Map keyboard input to Messages based on current application state.
 fn map_key_event(key: &KeyEvent, model: &Model) -> Option<Message> {
-    // Check for leader key sequences first
     if model.leader_state.waiting_for_sequence {
         return handle_leader_sequence(key, model);
     }
 
-    // Check if this is a leader key
+    if !model.palette_open && model.slash_is_active() {
+        if let Some(message) = map_slash_input(key) {
+            return Some(message);
+        }
+    }
+
     if model.keybinds.is_leader_key(key) {
         return Some(Message::StartLeaderSequence);
     }
 
-    // Check for global keybind actions first (they work even in palette)
     if let Some(action) = model.keybinds.get_action(key) {
         return keybind_action_to_message(action, model);
     }
 
-    // Handle Escape - context sensitive
     if matches!(key.code, KeyCode::Esc) && key.modifiers == KeyModifiers::NONE {
         if model.palette_open {
             return Some(Message::ClosePalette);
-        } else {
-            return None; // Ignore in other contexts
         }
+        return None;
     }
 
-    // Command palette input handling (for non-global keys)
     if model.palette_open {
         return map_palette_input(key);
     }
 
-    // Input field handling (when not in palette and not streaming)
     if !model.is_streaming {
         return map_input_events(key);
     }
 
-    // Ignore all input while streaming
     None
 }
 
-/// Handle leader key sequences
 fn handle_leader_sequence(key: &KeyEvent, model: &Model) -> Option<Message> {
-    if let Some(_action) = model.keybinds.get_leader_action(key.code) {
-        // Execute the leader action and cancel the sequence
+    if model.keybinds.get_leader_action(key.code).is_some() {
         Some(Message::ExecuteLeaderAction(key.code))
     } else {
-        // Invalid sequence - cancel it
         Some(Message::CancelLeaderSequence)
     }
 }
 
-/// Convert a KeyAction to a Message
 fn keybind_action_to_message(action: &KeyAction, model: &Model) -> Option<Message> {
     match action {
         KeyAction::Message(msg) => Some(msg.clone()),
@@ -155,7 +136,6 @@ fn keybind_action_to_message(action: &KeyAction, model: &Model) -> Option<Messag
         KeyAction::ToggleMode => Some(Message::ToggleMode),
         KeyAction::ToggleDebug => Some(Message::ToggleDebugPanel),
         KeyAction::ToggleTheme => {
-            // Toggle between dark and light theme based on current theme
             let new_theme = if model.theme.is_dark() {
                 ThemeChoice::Light
             } else {
@@ -168,7 +148,6 @@ fn keybind_action_to_message(action: &KeyAction, model: &Model) -> Option<Messag
     }
 }
 
-/// Map key events when the command palette is open
 fn map_palette_input(key: &KeyEvent) -> Option<Message> {
     match key.code {
         KeyCode::Char(ch) => Some(Message::PaletteInput(ch)),
@@ -180,7 +159,18 @@ fn map_palette_input(key: &KeyEvent) -> Option<Message> {
     }
 }
 
-/// Map key events for the main input field
+fn map_slash_input(key: &KeyEvent) -> Option<Message> {
+    match (key.code, key.modifiers) {
+        (KeyCode::Tab, KeyModifiers::NONE) | (KeyCode::Down, KeyModifiers::NONE) => {
+            Some(Message::SlashNav(1))
+        }
+        (KeyCode::BackTab, _) | (KeyCode::Up, KeyModifiers::NONE) => Some(Message::SlashNav(-1)),
+        (KeyCode::Esc, KeyModifiers::NONE) => Some(Message::SlashCancel),
+        (KeyCode::Enter, KeyModifiers::NONE) => Some(Message::SlashExecute),
+        _ => map_input_events(key),
+    }
+}
+
 fn map_input_events(key: &KeyEvent) -> Option<Message> {
     match key.code {
         KeyCode::Char(ch) => Some(Message::KeyInput(ch)),
@@ -223,11 +213,9 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL);
         let event = Event::Key(key);
 
-        // Should open palette when closed
         let message = map_event(&event, &model);
         assert!(matches!(message, Some(Message::OpenPalette)));
 
-        // Should close palette when open
         model.palette_open = true;
         let message = map_event(&event, &model);
         assert!(matches!(message, Some(Message::ClosePalette)));
@@ -241,7 +229,6 @@ mod tests {
         let key = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
         let event = Event::Key(key);
 
-        // Should ignore input while streaming
         let message = map_event(&event, &model);
         assert!(message.is_none());
     }
@@ -261,10 +248,36 @@ mod tests {
     #[test]
     fn test_regular_input() {
         let model = test_model();
-        let key = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+        let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
         let event = Event::Key(key);
 
         let message = map_event(&event, &model);
-        assert!(matches!(message, Some(Message::KeyInput('h'))));
+        assert!(matches!(message, Some(Message::KeyInput('q'))));
+    }
+
+    #[test]
+    fn test_slash_tab_navigates_instead_of_toggling_mode() {
+        let mut model = test_model();
+        model.input = "/".to_string();
+        model.slash_state = crate::slash::state_for_input(&model.input);
+
+        let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let event = Event::Key(key);
+
+        let message = map_event(&event, &model);
+        assert!(matches!(message, Some(Message::SlashNav(1))));
+    }
+
+    #[test]
+    fn test_slash_enter_executes_command() {
+        let mut model = test_model();
+        model.input = "/help".to_string();
+        model.slash_state = crate::slash::state_for_input(&model.input);
+
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let event = Event::Key(key);
+
+        let message = map_event(&event, &model);
+        assert!(matches!(message, Some(Message::SlashExecute)));
     }
 }

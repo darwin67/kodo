@@ -36,13 +36,19 @@ pub fn view(frame: &mut Frame, model: &Model) {
         (area, None)
     };
 
+    let slash_height = model
+        .slash_state
+        .as_ref()
+        .map(|state| state.completions.len().min(7) as u16 + 2)
+        .unwrap_or(0);
+
     // Main layout: status bar (1 line) at top, input (3 lines) at bottom, output fills middle
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1), // Status bar
             Constraint::Min(1),    // Output/chat area
-            Constraint::Length(3), // Input area
+            Constraint::Length(3 + slash_height), // Input area
         ])
         .split(main_area);
 
@@ -191,6 +197,18 @@ fn render_output(frame: &mut Frame, model: &Model, area: Rect) {
 
 /// Render the input area where users type messages
 fn render_input(frame: &mut Frame, model: &Model, area: Rect) {
+    let input_area = if let Some(state) = model.slash_state.as_ref() {
+        let slash_rows = state.completions.len().min(7) as u16;
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(slash_rows + 2), Constraint::Length(3)])
+            .split(area);
+        render_slash_completions(frame, model, chunks[0]);
+        chunks[1]
+    } else {
+        area
+    };
+
     let input_text = if model.is_streaming {
         " (streaming...)"
     } else {
@@ -206,12 +224,52 @@ fn render_input(frame: &mut Frame, model: &Model, area: Rect) {
         )
         .style(model.theme.text_style());
 
-    frame.render_widget(input, area);
+    frame.render_widget(input, input_area);
 
     // Position cursor inside the input box
     if !model.is_streaming {
-        frame.set_cursor_position((area.x + model.cursor_pos as u16 + 1, area.y + 1));
+        frame.set_cursor_position((
+            input_area.x + model.cursor_pos as u16 + 1,
+            input_area.y + 1,
+        ));
     }
+}
+
+fn render_slash_completions(frame: &mut Frame, model: &Model, area: Rect) {
+    let Some(state) = model.slash_state.as_ref() else {
+        return;
+    };
+
+    let selected = state.selected.min(state.completions.len().saturating_sub(1));
+    let mut lines = Vec::new();
+
+    for (index, command) in state.completions.iter().take(7).enumerate() {
+        let signature = if command.args.is_empty() {
+            format!("/{}", command.name)
+        } else {
+            format!("/{} {}", command.name, command.args)
+        };
+
+        let style = if index == selected {
+            model.theme.accent_style().add_modifier(Modifier::REVERSED)
+        } else {
+            model.theme.text_style()
+        };
+
+        lines.push(Line::styled(
+            format!("  {signature:<26} {}", command.description),
+            style,
+        ));
+    }
+
+    let widget = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(model.theme.accent_style())
+            .title(" Slash "),
+    );
+
+    frame.render_widget(widget, area);
 }
 
 /// Render the debug panel showing debug logs

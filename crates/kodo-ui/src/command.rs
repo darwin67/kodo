@@ -16,6 +16,18 @@ pub enum Command {
     /// The runtime will perform cleanup and terminate the event loop.
     Quit,
 
+    /// Clear the runtime-side conversation history.
+    ClearConversation,
+
+    /// Switch the active model in the runtime.
+    SetModel(String),
+
+    /// List configured providers from the auth store.
+    ListProviders,
+
+    /// Remove stored credentials for a provider/account identifier.
+    LogoutProvider(String),
+
     /// No operation - a convenience variant for update() arms that don't
     /// need to perform side effects. Allows cleaner match expressions.
     None,

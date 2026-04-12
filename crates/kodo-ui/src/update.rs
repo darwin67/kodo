@@ -1,37 +1,21 @@
 use crate::command::Command;
 use crate::message::{Message, ThemeChoice};
 use crate::model::{ChatMessage, ChatRole, Model};
+use crate::slash::{self, COMMANDS};
 use crate::theme::Theme;
+use kodo_llm::models::available_models;
 
 /// The core update function following the Elm Architecture.
-///
-/// This is a PURE function that takes the current model and a message,
-/// then returns a list of commands to execute. It performs NO side effects:
-/// - No I/O operations
-/// - No network calls  
-/// - No file system access
-/// - No printing to stdout/stderr
-///
-/// All side effects are represented as Commands that the runtime executes.
-/// This makes the function:
-/// - Completely testable
-/// - Deterministic
-/// - Reusable across different runtimes (TUI, GUI, tests)
-///
-/// Every possible state change in the application flows through this function.
 pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
     match message {
-        // -- Input events --
         Message::KeyInput(ch) => {
             if model.palette_open {
-                // Add character to palette search query
                 model.palette_query.push(ch);
-                // Reset selection to top when query changes
                 model.palette_selected = 0;
             } else {
-                // Add character to user input
                 model.input.insert(model.cursor_pos, ch);
                 model.cursor_pos += 1;
+                sync_slash_state(model);
             }
             vec![Command::None]
         }
@@ -47,6 +31,7 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
         Message::Delete => {
             if !model.palette_open && model.cursor_pos < model.input.len() {
                 model.input.remove(model.cursor_pos);
+                sync_slash_state(model);
             }
             vec![Command::None]
         }
@@ -82,9 +67,18 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
         Message::Submit => {
             if model.palette_open {
                 handle_palette_select(model)
+            } else if model.slash_is_active() {
+                handle_slash_execute(model)
             } else {
                 handle_input_submit(model)
             }
+        }
+
+        Message::SlashNav(delta) => handle_slash_nav(model, delta),
+        Message::SlashExecute => handle_slash_execute(model),
+        Message::SlashCancel => {
+            model.slash_state = None;
+            vec![Command::None]
         }
 
         Message::ScrollUp(lines) => {
@@ -97,9 +91,7 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
             vec![Command::None]
         }
 
-        // -- Mode --
         Message::ToggleMode => {
-            // Toggle between Plan and Build mode
             let new_mode = if model.mode == "Plan" {
                 "Build".to_string()
             } else {
@@ -107,17 +99,13 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
             };
             model.mode = new_mode.clone();
 
-            // Log mode change to debug panel if debug mode is enabled
             if model.debug_mode {
-                model
-                    .debug_logs
-                    .push(format!("🔄 Mode toggled to {}", new_mode));
+                model.debug_logs.push(format!("Mode toggled to {new_mode}"));
             }
 
             vec![Command::None]
         }
 
-        // -- Command palette --
         Message::OpenPalette => {
             model.palette_open = true;
             model.palette_query.clear();
@@ -148,14 +136,12 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
         }
 
         Message::PaletteDown => {
-            // Increment selection (view layer will clamp to available items)
             model.palette_selected += 1;
             vec![Command::None]
         }
 
         Message::PaletteSelect => handle_palette_select(model),
 
-        // -- Theme --
         Message::SetTheme(choice) => {
             model.theme = match choice {
                 ThemeChoice::Dark => {
@@ -171,7 +157,6 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
             vec![Command::None]
         }
 
-        // -- Debug --
         Message::ToggleDebugPanel => {
             if model.debug_mode {
                 model.debug_panel_open = !model.debug_panel_open;
@@ -180,22 +165,19 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
                 } else {
                     "closed"
                 };
-                model.debug_logs.push(format!("🔍 Debug panel {}", status));
+                model.debug_logs.push(format!("Debug panel {status}"));
             }
             vec![Command::None]
         }
 
-        // -- Agent lifecycle --
         Message::AgentTextDelta(text) => {
             model.streaming_text.push_str(&text);
             model.is_streaming = true;
-            // Auto-scroll to bottom when streaming
             model.scroll_offset = 0;
             vec![Command::None]
         }
 
         Message::AgentTextDone => {
-            // Move streaming text to messages
             if !model.streaming_text.is_empty() {
                 let text = std::mem::take(&mut model.streaming_text);
                 model.messages.push(ChatMessage {
@@ -210,17 +192,15 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
 
         Message::AgentToolStart { name } => {
             if model.debug_mode {
-                model.debug_logs.push(format!("🔧 Tool started: {}", name));
+                model.debug_logs.push(format!("Tool started: {name}"));
             }
             vec![Command::None]
         }
 
         Message::AgentToolDone { name, success } => {
             if model.debug_mode {
-                let status = if success { "✅" } else { "❌" };
-                model
-                    .debug_logs
-                    .push(format!("{} Tool finished: {}", status, name));
+                let status = if success { "ok" } else { "failed" };
+                model.debug_logs.push(format!("Tool {status}: {name}"));
             }
             vec![Command::None]
         }
@@ -229,23 +209,21 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
             if model.debug_mode {
                 model
                     .debug_logs
-                    .push(format!("🚫 Tool denied: {} - {}", name, reason));
+                    .push(format!("Tool denied: {name} - {reason}"));
             }
             vec![Command::None]
         }
 
         Message::AgentToolCancelled { name } => {
             if model.debug_mode {
-                model
-                    .debug_logs
-                    .push(format!("🛑 Tool cancelled: {}", name));
+                model.debug_logs.push(format!("Tool cancelled: {name}"));
             }
             vec![Command::None]
         }
 
         Message::AgentFormatted { message } => {
             if model.debug_mode {
-                model.debug_logs.push(format!("Formatted: {}", message));
+                model.debug_logs.push(format!("Formatted: {message}"));
             }
             vec![Command::None]
         }
@@ -254,27 +232,21 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
             if model.debug_mode {
                 model
                     .debug_logs
-                    .push(format!("LSP: {} diagnostic(s)", count));
+                    .push(format!("LSP: {count} diagnostic(s)"));
             }
-            // Show diagnostics in chat so user sees errors/warnings.
             if count > 0 {
-                model.messages.push(ChatMessage {
-                    role: ChatRole::System,
-                    content: summary,
-                });
-                model.scroll_offset = 0;
+                push_system_message(model, summary);
             }
             vec![Command::None]
         }
 
         Message::AgentError(error) => {
             if model.debug_mode {
-                model.debug_logs.push(format!("💥 Error: {}", error));
+                model.debug_logs.push(format!("Error: {error}"));
             }
-            // Also show error in chat
             model.messages.push(ChatMessage {
                 role: ChatRole::Assistant,
-                content: format!("Error: {}", error),
+                content: format!("Error: {error}"),
             });
             model.is_streaming = false;
             model.streaming_text.clear();
@@ -286,23 +258,38 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
             vec![Command::None]
         }
 
-        // -- System --
-        Message::Tick => {
-            // Check for leader sequence timeout
-            if model.leader_state.check_timeout() {
-                // Leader sequence timed out - no need to update UI, just cancel
+        Message::Notice(message) => {
+            push_system_message(model, message);
+            vec![Command::None]
+        }
+
+        Message::ProvidersListed(providers) => {
+            if providers.is_empty() {
+                push_system_message(model, "No connected providers found.".to_string());
+            } else {
+                let providers = providers
+                    .into_iter()
+                    .map(|provider| format!("- {provider}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                push_system_message(model, format!("Connected providers:\n{providers}"));
             }
-            // Periodic update - could be used for animations, etc.
+            vec![Command::None]
+        }
+
+        Message::LogoutComplete(account_id) => {
+            push_system_message(model, format!("Logged out `{account_id}`."));
+            vec![Command::None]
+        }
+
+        Message::Tick => {
+            let _ = model.leader_state.check_timeout();
             vec![Command::None]
         }
 
         Message::Resize(width, height) => {
-            // Terminal resize - no model changes needed, just re-render
-            // Could log this if needed
             if model.debug_mode {
-                model
-                    .debug_logs
-                    .push(format!("📐 Resize: {}x{}", width, height));
+                model.debug_logs.push(format!("Resize: {width}x{height}"));
             }
             vec![Command::None]
         }
@@ -312,7 +299,6 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
             vec![Command::Quit]
         }
 
-        // -- Keybinds --
         Message::StartLeaderSequence => {
             model.leader_state.start_sequence();
             vec![]
@@ -321,7 +307,6 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
         Message::ExecuteLeaderAction(key) => {
             model.leader_state.cancel_sequence();
             if let Some(action) = model.keybinds.get_leader_action(key) {
-                // Convert action to a message and recursively handle it
                 let msg = match action {
                     crate::keybinds::KeyAction::Message(msg) => msg.clone(),
                     crate::keybinds::KeyAction::OpenPalette => Message::OpenPalette,
@@ -329,14 +314,8 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
                     crate::keybinds::KeyAction::ToggleDebug => Message::ToggleDebugPanel,
                     crate::keybinds::KeyAction::ToggleTheme => {
                         let new_theme = if model.theme.is_dark() {
-                            model
-                                .debug_logs
-                                .push("Theme toggle: Dark -> Light".to_string());
                             ThemeChoice::Light
                         } else {
-                            model
-                                .debug_logs
-                                .push("Theme toggle: Light -> Dark".to_string());
                             ThemeChoice::Dark
                         };
                         Message::SetTheme(new_theme)
@@ -357,16 +336,15 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
     }
 }
 
-/// Handle backspace in the input field
 fn handle_input_backspace(model: &mut Model) -> Vec<Command> {
     if model.cursor_pos > 0 {
         model.cursor_pos -= 1;
         model.input.remove(model.cursor_pos);
     }
+    sync_slash_state(model);
     vec![Command::None]
 }
 
-/// Handle backspace in the command palette
 fn handle_palette_backspace(model: &mut Model) -> Vec<Command> {
     if !model.palette_query.is_empty() {
         model.palette_query.pop();
@@ -375,35 +353,150 @@ fn handle_palette_backspace(model: &mut Model) -> Vec<Command> {
     vec![Command::None]
 }
 
-/// Handle submitting user input
 fn handle_input_submit(model: &mut Model) -> Vec<Command> {
     if model.input.trim().is_empty() {
         return vec![Command::None];
     }
 
-    // Add user message to chat
     let user_input = std::mem::take(&mut model.input);
     model.messages.push(ChatMessage {
         role: ChatRole::User,
         content: user_input.clone(),
     });
 
-    // Reset input state
     model.cursor_pos = 0;
     model.scroll_offset = 0;
+    model.slash_state = None;
 
-    // Send to agent for processing
     vec![Command::send_to_agent(user_input)]
 }
 
-/// Handle selecting a command palette item
+fn handle_slash_nav(model: &mut Model, delta: i32) -> Vec<Command> {
+    let Some(state) = model.slash_state.as_mut() else {
+        return vec![Command::None];
+    };
+
+    if state.completions.is_empty() {
+        return vec![Command::None];
+    }
+
+    let len = state.completions.len() as i32;
+    let next = (state.selected as i32 + delta).rem_euclid(len);
+    state.selected = next as usize;
+    vec![Command::None]
+}
+
+fn handle_slash_execute(model: &mut Model) -> Vec<Command> {
+    if model.input.trim().is_empty() {
+        return vec![Command::None];
+    }
+
+    let parsed = slash::parse(&model.input);
+    let selected_name = model
+        .slash_state
+        .as_ref()
+        .and_then(|state| state.completions.get(state.selected))
+        .map(|command| command.name);
+
+    let command_name = if COMMANDS.iter().any(|command| command.name == parsed.name) {
+        parsed.name
+    } else if let Some(selected_name) = selected_name {
+        selected_name.to_string()
+    } else {
+        parsed.name
+    };
+    let args = parsed.args;
+
+    model.input.clear();
+    model.cursor_pos = 0;
+    model.slash_state = None;
+
+    match command_name.as_str() {
+        "help" => {
+            push_system_message(model, slash::format_help());
+            vec![Command::None]
+        }
+        "clear" => {
+            model.messages.clear();
+            model.streaming_text.clear();
+            model.scroll_offset = 0;
+            vec![Command::ClearConversation]
+        }
+        "compact" => {
+            push_system_message(model, "Context compaction is not implemented yet.".to_string());
+            vec![Command::None]
+        }
+        "model" => {
+            if let Some(model_id) = args.first() {
+                if model_is_known_for_provider(&model.provider, model_id) {
+                    model.model_name = model_id.clone();
+                    push_system_message(model, format!("Switched model to `{model_id}`."));
+                    vec![Command::SetModel(model_id.clone())]
+                } else {
+                    push_system_message(
+                        model,
+                        format!(
+                            "Unknown model `{model_id}` for provider `{}`.",
+                            model.provider
+                        ),
+                    );
+                    vec![Command::None]
+                }
+            } else {
+                push_system_message(
+                    model,
+                    format!("Current model: `{}` / `{}`.", model.provider, model.model_name),
+                );
+                vec![Command::None]
+            }
+        }
+        "providers" => vec![Command::ListProviders],
+        "login" => {
+            let provider = args.first().map(String::as_str).unwrap_or("<provider>");
+            push_system_message(
+                model,
+                format!(
+                    "`/login {provider}` is not wired yet. The slash UI is ready, but provider login still needs backend support."
+                ),
+            );
+            vec![Command::None]
+        }
+        "logout" => {
+            if let Some(account_id) = args.first() {
+                vec![Command::LogoutProvider(account_id.clone())]
+            } else {
+                push_system_message(model, "Usage: /logout <account_id>".to_string());
+                vec![Command::None]
+            }
+        }
+        other => {
+            push_system_message(model, format!("Unknown slash command `/{other}`."));
+            vec![Command::None]
+        }
+    }
+}
+
+fn sync_slash_state(model: &mut Model) {
+    model.slash_state = slash::state_for_input(&model.input);
+}
+
+fn model_is_known_for_provider(provider: &str, model_id: &str) -> bool {
+    available_models(provider)
+        .iter()
+        .any(|candidate| candidate.id == model_id)
+}
+
+fn push_system_message(model: &mut Model, content: String) {
+    model.messages.push(ChatMessage {
+        role: ChatRole::System,
+        content,
+    });
+    model.scroll_offset = 0;
+}
+
 fn handle_palette_select(model: &mut Model) -> Vec<Command> {
-    // This would need to be implemented based on available commands
-    // For now, close the palette and handle common commands
     model.palette_open = false;
 
-    // Simple command matching - in a real implementation this would
-    // be more sophisticated with actual command definitions
     match model.palette_query.to_lowercase().as_str() {
         "quit" | "exit" => {
             model.should_quit = true;
@@ -474,8 +567,6 @@ mod tests {
         assert_eq!(model.messages[0].content, "Hello agent");
         assert!(model.input.is_empty());
         assert_eq!(model.cursor_pos, 0);
-
-        // Should generate SendToAgent command
         assert_eq!(commands.len(), 1);
         assert!(matches!(commands[0], Command::SendToAgent(_)));
     }
@@ -508,5 +599,111 @@ mod tests {
         assert!(model.streaming_text.is_empty());
         assert_eq!(model.messages.len(), 1);
         assert_eq!(model.messages[0].content, "Hello world");
+    }
+
+    #[test]
+    fn test_slash_input_opens_completion_state() {
+        let mut model = Model::new(false);
+
+        update(&mut model, Message::KeyInput('/'));
+
+        let state = model.slash_state.as_ref().unwrap();
+        assert_eq!(state.completions.len(), slash::COMMANDS.len());
+    }
+
+    #[test]
+    fn test_slash_backspace_clears_state() {
+        let mut model = Model::new(false);
+        model.input = "/".to_string();
+        model.cursor_pos = 1;
+        model.slash_state = slash::state_for_input(&model.input);
+
+        update(&mut model, Message::Backspace);
+
+        assert!(model.slash_state.is_none());
+        assert!(model.input.is_empty());
+    }
+
+    #[test]
+    fn test_slash_help_appends_formatted_commands() {
+        let mut model = Model::new(false);
+        model.input = "/help".to_string();
+        model.cursor_pos = model.input.len();
+        model.slash_state = slash::state_for_input(&model.input);
+
+        let commands = update(&mut model, Message::SlashExecute);
+
+        assert!(commands.iter().all(|command| command.is_none()));
+        assert!(model.messages.last().unwrap().content.contains("Available slash commands:"));
+    }
+
+    #[test]
+    fn test_slash_model_without_arg_shows_current_model() {
+        let mut model = Model::new(false);
+        model.provider = "openai".to_string();
+        model.model_name = "gpt-4o".to_string();
+        model.input = "/model".to_string();
+        model.cursor_pos = model.input.len();
+        model.slash_state = slash::state_for_input(&model.input);
+
+        update(&mut model, Message::SlashExecute);
+
+        assert!(model.messages.last().unwrap().content.contains("Current model"));
+    }
+
+    #[test]
+    fn test_slash_model_with_arg_dispatches_set_model() {
+        let mut model = Model::new(false);
+        model.provider = "openai".to_string();
+        model.input = "/model gpt-4o-mini".to_string();
+        model.cursor_pos = model.input.len();
+        model.slash_state = slash::state_for_input(&model.input);
+
+        let commands = update(&mut model, Message::SlashExecute);
+
+        assert_eq!(model.model_name, "gpt-4o-mini");
+        assert_eq!(commands.len(), 1);
+        assert!(matches!(&commands[0], Command::SetModel(model) if model == "gpt-4o-mini"));
+    }
+
+    #[test]
+    fn test_slash_providers_dispatches_runtime_command() {
+        let mut model = Model::new(false);
+        model.input = "/providers".to_string();
+        model.cursor_pos = model.input.len();
+        model.slash_state = slash::state_for_input(&model.input);
+
+        let commands = update(&mut model, Message::SlashExecute);
+
+        assert!(matches!(commands.as_slice(), [Command::ListProviders]));
+    }
+
+    #[test]
+    fn test_slash_logout_dispatches_runtime_command() {
+        let mut model = Model::new(false);
+        model.input = "/logout openai".to_string();
+        model.cursor_pos = model.input.len();
+        model.slash_state = slash::state_for_input(&model.input);
+
+        let commands = update(&mut model, Message::SlashExecute);
+
+        assert!(matches!(commands.as_slice(), [Command::LogoutProvider(account)] if account == "openai"));
+    }
+
+    #[test]
+    fn test_slash_unknown_command_appends_error() {
+        let mut model = Model::new(false);
+        model.input = "/wat".to_string();
+        model.cursor_pos = model.input.len();
+        model.slash_state = slash::state_for_input(&model.input);
+
+        update(&mut model, Message::SlashExecute);
+
+        assert!(model
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .contains("Unknown slash command"));
     }
 }

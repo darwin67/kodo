@@ -1,5 +1,6 @@
 use crate::{
     keybinds::{KeyBindRegistry, LeaderState},
+    slash::SlashState,
     syntax::SyntaxHighlighter,
     theme::Theme,
 };
@@ -63,6 +64,10 @@ pub struct Model {
     /// Index of the currently selected palette item
     pub palette_selected: usize,
 
+    // -- Slash command state --
+    /// Active slash command autocomplete state
+    pub slash_state: Option<SlashState>,
+
     // -- Debug state --
     /// Whether debug mode is enabled (--debug flag)
     pub debug_mode: bool,
@@ -117,6 +122,9 @@ impl Model {
             palette_query: String::new(),
             palette_selected: 0,
 
+            // Slash state
+            slash_state: None,
+
             // Debug state
             debug_mode,
             debug_panel_open: false,
@@ -162,6 +170,11 @@ impl Model {
     /// Check if the command palette is open.
     pub fn palette_is_open(&self) -> bool {
         self.palette_open
+    }
+
+    /// Check if slash mode is active.
+    pub fn slash_is_active(&self) -> bool {
+        self.slash_state.is_some()
     }
 
     /// Check if the debug panel is open.

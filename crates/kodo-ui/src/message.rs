@@ -21,6 +21,12 @@ pub enum Message {
     CursorEnd,
     /// User pressed Enter to submit input
     Submit,
+    /// Move slash completion selection
+    SlashNav(i32),
+    /// Execute current slash command
+    SlashExecute,
+    /// Cancel slash mode without clearing input
+    SlashCancel,
     /// Scroll chat history up by given lines
     ScrollUp(u16),
     /// Scroll chat history down by given lines
@@ -83,6 +89,12 @@ pub enum Message {
     AgentError(String),
     /// Agent finished processing (no more streaming or tools)
     AgentDone,
+    /// Runtime produced a user-visible informational message
+    Notice(String),
+    /// Runtime listed providers from the auth store
+    ProvidersListed(Vec<String>),
+    /// Runtime completed a logout request
+    LogoutComplete(String),
 
     // -- System --
     /// Periodic tick for animations/updates

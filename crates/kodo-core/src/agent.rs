@@ -66,6 +66,12 @@ pub enum AgentEvent {
     Diagnostics { summary: String, count: usize },
     /// An error occurred.
     Error(String),
+    /// A user-visible informational message.
+    Notice(String),
+    /// Stored providers were listed from the auth store.
+    ProvidersListed(Vec<String>),
+    /// A logout request completed.
+    LogoutComplete(String),
     /// Message processing is complete.
     Done,
 }
@@ -135,6 +141,10 @@ impl Agent {
 
     pub fn set_model(&mut self, model: impl Into<String>) {
         self.model = model.into();
+    }
+
+    pub fn clear_conversation(&mut self) {
+        self.messages.clear();
     }
 
     pub fn provider_name(&self) -> &str {
