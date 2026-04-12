@@ -1,4 +1,6 @@
 #+TITLE: Elm Architecture Refactor (TUI/GUI Shared UI Loop)
+#+AUTHOR: Darwin D. Wu
+#+STATUS: DONE
 #+DATE: 2026-03-31
 
 * Motivation

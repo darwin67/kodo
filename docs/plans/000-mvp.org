@@ -1,11 +1,11 @@
 #+TITLE: Kodo Strategy & Architecture Plan
-#+AUTHOR: Claude
+#+AUTHOR: Darwin D. Wu
+#+STATUS: ACTIVE
 #+DATE: <2026-03-27 Fri>
 
 Kodo is a model-agnostic, terminal-based coding agent written in Rust. It follows
 the agentic loop pattern — gather context, take action, verify results — inspired by
-[[https://code.claude.com/docs/en/how-claude-code-works][Claude Code]] and
-[[https://opencode.ai/docs/][OpenCode]].
+[[https://code.claude.com/docs/en/how-claude-code-works][Claude Code]] and [[https://opencode.ai/docs/][OpenCode]].
 
 This document captures the architecture, design decisions, and implementation roadmap.
 
