@@ -241,6 +241,20 @@ impl AnthropicProvider {
         Ok(Self::new(api_key))
     }
 
+    /// Create a provider that can be configured later.
+    pub fn from_env_or_empty() -> Self {
+        Self::new(std::env::var("ANTHROPIC_API_KEY").unwrap_or_default())
+    }
+
+    fn ensure_api_key(&self) -> Result<()> {
+        if self.api_key.trim().is_empty() {
+            bail!(
+                "Anthropic API key not configured. Set ANTHROPIC_API_KEY or start with --provider ollama"
+            );
+        }
+        Ok(())
+    }
+
     fn build_api_request(&self, request: &CompletionRequest, stream: bool) -> ApiRequest {
         ApiRequest {
             model: request.model.clone(),
@@ -256,6 +270,7 @@ impl AnthropicProvider {
 #[async_trait]
 impl Provider for AnthropicProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
+        self.ensure_api_key()?;
         let api_req = self.build_api_request(&request, false);
 
         let resp = self
@@ -307,6 +322,7 @@ impl Provider for AnthropicProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        self.ensure_api_key()?;
         let api_req = self.build_api_request(&request, true);
 
         let resp = self
@@ -947,6 +963,24 @@ mod tests {
         assert!(result.is_err());
 
         // Restore
+        if let Some(key) = original {
+            unsafe {
+                std::env::set_var("ANTHROPIC_API_KEY", key);
+            }
+        }
+    }
+
+    #[test]
+    fn from_env_or_empty_allows_unconfigured_provider() {
+        let original = std::env::var("ANTHROPIC_API_KEY").ok();
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+        }
+
+        let provider = AnthropicProvider::from_env_or_empty();
+        assert!(provider.api_key.is_empty());
+        assert!(provider.ensure_api_key().is_err());
+
         if let Some(key) = original {
             unsafe {
                 std::env::set_var("ANTHROPIC_API_KEY", key);

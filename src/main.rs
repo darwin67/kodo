@@ -39,9 +39,9 @@ struct Cli {
 
 fn create_provider(name: &str) -> Result<Arc<dyn Provider>> {
     match name {
-        "anthropic" => Ok(Arc::new(AnthropicProvider::from_env()?)),
-        "openai" => Ok(Arc::new(OpenAiProvider::from_env()?)),
-        "gemini" => Ok(Arc::new(GeminiProvider::from_env()?)),
+        "anthropic" => Ok(Arc::new(AnthropicProvider::from_env_or_empty())),
+        "openai" => Ok(Arc::new(OpenAiProvider::from_env_or_empty())),
+        "gemini" => Ok(Arc::new(GeminiProvider::from_env_or_empty())),
         "ollama" => Ok(Arc::new(OllamaProvider::from_env())),
         _ => bail!("unknown provider: {name}. Available: anthropic, openai, gemini, ollama"),
     }

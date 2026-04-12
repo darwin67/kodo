@@ -223,6 +223,23 @@ impl GeminiProvider {
         Ok(Self::new(api_key))
     }
 
+    /// Create a provider that can be configured later.
+    pub fn from_env_or_empty() -> Self {
+        let api_key = std::env::var("GEMINI_API_KEY")
+            .or_else(|_| std::env::var("GOOGLE_API_KEY"))
+            .unwrap_or_default();
+        Self::new(api_key)
+    }
+
+    fn ensure_api_key(&self) -> Result<()> {
+        if self.api_key.trim().is_empty() {
+            bail!(
+                "Gemini API key not configured. Set GEMINI_API_KEY or GOOGLE_API_KEY, or start with --provider ollama"
+            );
+        }
+        Ok(())
+    }
+
     fn endpoint(&self, model: &str, method: &str) -> String {
         format!(
             "{}/models/{}:{}?key={}",
@@ -234,6 +251,7 @@ impl GeminiProvider {
 #[async_trait]
 impl Provider for GeminiProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
+        self.ensure_api_key()?;
         let system_instruction: Option<ApiContent> = request.system.as_ref().map(|s| {
             serde_json::from_value(serde_json::json!({
                 "parts": [{"text": s}]
@@ -315,6 +333,7 @@ impl Provider for GeminiProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        self.ensure_api_key()?;
         let system_instruction = request.system.as_ref().map(|s| {
             serde_json::from_value::<ApiContent>(serde_json::json!({
                 "parts": [{"text": s}]
@@ -608,6 +627,28 @@ mod tests {
 
         let result = GeminiProvider::from_env();
         assert!(result.is_err());
+
+        if let Some(key) = orig_gemini {
+            unsafe { std::env::set_var("GEMINI_API_KEY", key) };
+        }
+        if let Some(key) = orig_google {
+            unsafe { std::env::set_var("GOOGLE_API_KEY", key) };
+        }
+    }
+
+    #[test]
+    fn from_env_or_empty_allows_unconfigured_provider() {
+        let orig_gemini = std::env::var("GEMINI_API_KEY").ok();
+        let orig_google = std::env::var("GOOGLE_API_KEY").ok();
+
+        unsafe {
+            std::env::remove_var("GEMINI_API_KEY");
+            std::env::remove_var("GOOGLE_API_KEY");
+        }
+
+        let provider = GeminiProvider::from_env_or_empty();
+        assert!(provider.api_key.is_empty());
+        assert!(provider.ensure_api_key().is_err());
 
         if let Some(key) = orig_gemini {
             unsafe { std::env::set_var("GEMINI_API_KEY", key) };

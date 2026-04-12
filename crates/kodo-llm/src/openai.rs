@@ -314,6 +314,23 @@ impl OpenAiProvider {
         })
     }
 
+    /// Create a provider that can be configured later.
+    pub fn from_env_or_empty() -> Self {
+        let api_base = std::env::var("OPENAI_API_BASE").unwrap_or(DEFAULT_API_BASE.to_string());
+        Self {
+            client: Client::new(),
+            api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+            api_base,
+        }
+    }
+
+    fn ensure_api_key(&self) -> Result<()> {
+        if self.api_key.trim().is_empty() {
+            bail!("OpenAI API key not configured. Set OPENAI_API_KEY or start with --provider ollama");
+        }
+        Ok(())
+    }
+
     fn build_api_request(&self, request: &CompletionRequest, stream: bool) -> ApiRequest {
         ApiRequest {
             model: request.model.clone(),
@@ -335,6 +352,7 @@ impl OpenAiProvider {
 #[async_trait]
 impl Provider for OpenAiProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
+        self.ensure_api_key()?;
         let api_req = self.build_api_request(&request, false);
 
         let resp = self
@@ -397,6 +415,7 @@ impl Provider for OpenAiProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
+        self.ensure_api_key()?;
         let api_req = self.build_api_request(&request, true);
 
         let resp = self
@@ -810,6 +829,20 @@ mod tests {
 
         let result = OpenAiProvider::from_env();
         assert!(result.is_err());
+
+        if let Some(key) = original {
+            unsafe { std::env::set_var("OPENAI_API_KEY", key) };
+        }
+    }
+
+    #[test]
+    fn from_env_or_empty_allows_unconfigured_provider() {
+        let original = std::env::var("OPENAI_API_KEY").ok();
+        unsafe { std::env::remove_var("OPENAI_API_KEY") };
+
+        let provider = OpenAiProvider::from_env_or_empty();
+        assert!(provider.api_key.is_empty());
+        assert!(provider.ensure_api_key().is_err());
 
         if let Some(key) = original {
             unsafe { std::env::set_var("OPENAI_API_KEY", key) };
