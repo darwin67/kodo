@@ -83,10 +83,11 @@ fn map_key_event(key: &KeyEvent, model: &Model) -> Option<Message> {
         return handle_leader_sequence(key, model);
     }
 
-    if !model.palette_open && model.slash_is_active() {
-        if let Some(message) = map_slash_input(key) {
-            return Some(message);
-        }
+    if !model.palette_open
+        && model.slash_is_active()
+        && let Some(message) = map_slash_input(key)
+    {
+        return Some(message);
     }
 
     if model.keybinds.is_leader_key(key) {
