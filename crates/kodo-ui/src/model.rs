@@ -1,5 +1,6 @@
 use crate::{
     keybinds::{KeyBindRegistry, LeaderState},
+    slash::{SlashCommand, SlashState, builtin_commands},
     syntax::SyntaxHighlighter,
     theme::Theme,
 };
@@ -55,23 +56,17 @@ pub struct Model {
     /// Total output tokens generated this session
     pub output_tokens: u64,
 
-    // -- Command palette state --
-    /// Whether the command palette is currently open
-    pub palette_open: bool,
-    /// User's current search query in the palette
-    pub palette_query: String,
-    /// Index of the currently selected palette item
-    pub palette_selected: usize,
+    // -- Slash command state --
+    /// Available slash commands, including discovered skills.
+    pub commands: Vec<SlashCommand>,
+    /// Active slash command autocomplete state
+    pub slash_state: Option<SlashState>,
+    /// Pending skill text to prepend to the next outbound message.
+    pub pending_skill_injection: Option<String>,
 
     // -- Debug state --
     /// Whether debug mode is enabled (--debug flag)
     pub debug_mode: bool,
-    /// Whether the debug panel is currently visible
-    pub debug_panel_open: bool,
-    /// Debug log entries
-    pub debug_logs: Vec<String>,
-    /// Scroll offset for the debug panel
-    pub debug_scroll: u16,
 
     // -- UI state --
     /// Active color theme
@@ -112,16 +107,13 @@ impl Model {
             input_tokens: 0,
             output_tokens: 0,
 
-            // Palette state
-            palette_open: false,
-            palette_query: String::new(),
-            palette_selected: 0,
+            // Slash state
+            commands: builtin_commands(),
+            slash_state: None,
+            pending_skill_injection: None,
 
             // Debug state
             debug_mode,
-            debug_panel_open: false,
-            debug_logs: Vec::new(),
-            debug_scroll: 0,
 
             // UI state
             theme: Theme::dark(),
@@ -159,14 +151,9 @@ impl Model {
         self.messages.len()
     }
 
-    /// Check if the command palette is open.
-    pub fn palette_is_open(&self) -> bool {
-        self.palette_open
-    }
-
-    /// Check if the debug panel is open.
-    pub fn debug_panel_is_open(&self) -> bool {
-        self.debug_panel_open
+    /// Check if slash mode is active.
+    pub fn slash_is_active(&self) -> bool {
+        self.slash_state.is_some()
     }
 
     /// Get or initialize the syntax highlighter.

@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::Parser;
+use rpassword::prompt_password;
 use tokio::sync::mpsc;
 
 use kodo_core::agent::{Agent, AgentEvent};
@@ -11,12 +12,18 @@ use kodo_llm::gemini::GeminiProvider;
 use kodo_llm::ollama::OllamaProvider;
 use kodo_llm::openai::OpenAiProvider;
 use kodo_llm::provider::Provider;
+use kodo_store::auth;
+use kodo_store::crypto::KeychainStore;
+use kodo_store::db;
 use kodo_ui::command::Command;
 use kodo_ui::event::{EventHandler, map_event};
 use kodo_ui::message::Message;
-use kodo_ui::model::Model;
+use kodo_ui::model::{ChatMessage, ChatRole, Model};
+use kodo_ui::skills::{default_skill_dirs, load_skills};
 use kodo_ui::tui::{init_terminal, restore_terminal, view};
 use kodo_ui::update::update;
+
+const EVENT_TICK_RATE: Duration = Duration::from_millis(100);
 
 #[derive(Parser)]
 #[command(name = "kodo", about = "A coding agent for your terminal")]
@@ -29,16 +36,16 @@ struct Cli {
     #[arg(long, short)]
     provider: Option<String>,
 
-    /// Enable debug mode (shows debug side panel with Ctrl+\)
+    /// Enable in-chat debug logging at startup
     #[arg(long)]
     debug: bool,
 }
 
 fn create_provider(name: &str) -> Result<Arc<dyn Provider>> {
     match name {
-        "anthropic" => Ok(Arc::new(AnthropicProvider::from_env()?)),
-        "openai" => Ok(Arc::new(OpenAiProvider::from_env()?)),
-        "gemini" => Ok(Arc::new(GeminiProvider::from_env()?)),
+        "anthropic" => Ok(Arc::new(AnthropicProvider::from_env_or_empty())),
+        "openai" => Ok(Arc::new(OpenAiProvider::from_env_or_empty())),
+        "gemini" => Ok(Arc::new(GeminiProvider::from_env_or_empty())),
         "ollama" => Ok(Arc::new(OllamaProvider::from_env())),
         _ => bail!("unknown provider: {name}. Available: anthropic, openai, gemini, ollama"),
     }
@@ -59,6 +66,10 @@ fn default_model(provider_name: &str) -> &str {
 #[derive(Debug)]
 enum AgentRequest {
     ProcessMessage(String),
+    ClearConversation,
+    SetModel(String),
+    ListProviders,
+    LogoutProvider(String),
     Quit,
 }
 
@@ -86,19 +97,22 @@ async fn main() -> Result<()> {
 
     // Initialize terminal
     let mut terminal = init_terminal()?;
-    let mut events = EventHandler::new(Duration::from_millis(100));
+    let mut events = EventHandler::new(EVENT_TICK_RATE);
 
     // Initialize application state (Model) following Elm Architecture
     let mut model = Model::new(cli.debug);
     model.provider = agent.provider_name().to_string();
     model.model_name = agent.model().to_string();
     model.mode = agent.mode.to_string();
+    let (personal_skill_dir, project_skill_dir) = default_skill_dirs();
+    model.commands =
+        kodo_ui::slash::merge_commands(load_skills(&personal_skill_dir, &project_skill_dir));
 
     if cli.debug {
-        model.debug_panel_open = true;
-        model
-            .debug_logs
-            .push("Debug mode enabled. Toggle panel with F12".to_string());
+        model.messages.push(ChatMessage {
+            role: ChatRole::System,
+            content: "[debug] Debug logging enabled at startup.".to_string(),
+        });
     }
 
     // Channel for agent events -> TUI
@@ -117,6 +131,30 @@ async fn main() -> Result<()> {
                     }
                     // Always send Done so the TUI knows processing finished
                     let _ = agent_event_tx.send(AgentEvent::Done);
+                }
+                AgentRequest::ClearConversation => {
+                    agent.clear_conversation();
+                }
+                AgentRequest::SetModel(model) => {
+                    agent.set_model(model);
+                }
+                AgentRequest::ListProviders => match load_configured_providers().await {
+                    Ok(providers) => {
+                        let _ = agent_event_tx.send(AgentEvent::ProvidersListed(providers));
+                    }
+                    Err(error) => {
+                        let _ = agent_event_tx.send(AgentEvent::Error(format!("{error:#}")));
+                    }
+                },
+                AgentRequest::LogoutProvider(account_id) => {
+                    match logout_provider(&account_id).await {
+                        Ok(()) => {
+                            let _ = agent_event_tx.send(AgentEvent::LogoutComplete(account_id));
+                        }
+                        Err(error) => {
+                            let _ = agent_event_tx.send(AgentEvent::Error(format!("{error:#}")));
+                        }
+                    }
                 }
                 AgentRequest::Quit => {
                     agent.shutdown_lsp().await;
@@ -144,7 +182,14 @@ async fn main() -> Result<()> {
 
                     // EXECUTE COMMANDS: Handle side effects
                     for command in commands {
-                        execute_command(command, &req_tx).await;
+                        execute_command(
+                            command,
+                            &req_tx,
+                            &agent_tx,
+                            &mut terminal,
+                            &mut events,
+                        )
+                        .await;
                     }
                 }
             }
@@ -159,7 +204,14 @@ async fn main() -> Result<()> {
 
                 // EXECUTE COMMANDS: Handle side effects
                 for command in commands {
-                    execute_command(command, &req_tx).await;
+                    execute_command(
+                        command,
+                        &req_tx,
+                        &agent_tx,
+                        &mut terminal,
+                        &mut events,
+                    )
+                    .await;
                 }
             }
         }
@@ -179,10 +231,35 @@ async fn main() -> Result<()> {
 /// Execute Commands returned by update() - this is where side effects happen.
 /// The update() function is pure, but Commands describe side effects that
 /// the runtime must perform (sending messages to agents, quitting, etc).
-async fn execute_command(command: Command, req_tx: &mpsc::UnboundedSender<AgentRequest>) {
+async fn execute_command(
+    command: Command,
+    req_tx: &mpsc::UnboundedSender<AgentRequest>,
+    agent_tx: &mpsc::UnboundedSender<AgentEvent>,
+    terminal: &mut kodo_ui::Tui,
+    events: &mut EventHandler,
+) {
     match command {
         Command::SendToAgent(message) => {
             let _ = req_tx.send(AgentRequest::ProcessMessage(message));
+        }
+        Command::ClearConversation => {
+            let _ = req_tx.send(AgentRequest::ClearConversation);
+        }
+        Command::SetModel(model) => {
+            let _ = req_tx.send(AgentRequest::SetModel(model));
+        }
+        Command::ListProviders => {
+            let _ = req_tx.send(AgentRequest::ListProviders);
+        }
+        Command::LoginProvider { provider, name } => {
+            if let Err(error) =
+                handle_login_command(terminal, events, agent_tx, &provider, name.clone()).await
+            {
+                let _ = agent_tx.send(AgentEvent::Error(format!("{error:#}")));
+            }
+        }
+        Command::LogoutProvider(account_id) => {
+            let _ = req_tx.send(AgentRequest::LogoutProvider(account_id));
         }
         Command::Quit => {
             let _ = req_tx.send(AgentRequest::Quit);
@@ -207,6 +284,71 @@ fn map_agent_event(event: AgentEvent) -> Message {
         AgentEvent::Formatted { message } => Message::AgentFormatted { message },
         AgentEvent::Diagnostics { summary, count } => Message::AgentDiagnostics { summary, count },
         AgentEvent::Error(error) => Message::AgentError(error),
+        AgentEvent::Notice(message) => Message::Notice(message),
+        AgentEvent::ProvidersListed(providers) => Message::ProvidersListed(providers),
+        AgentEvent::LoginComplete { account_id, name } => {
+            Message::LoginComplete { account_id, name }
+        }
+        AgentEvent::LogoutComplete(account_id) => Message::LogoutComplete(account_id),
         AgentEvent::Done => Message::AgentDone,
     }
+}
+
+async fn load_configured_providers() -> Result<Vec<String>> {
+    let pool = db::open(&db::default_db_path()).await?;
+    auth::list_providers(&pool).await
+}
+
+async fn logout_provider(account_id: &str) -> Result<()> {
+    let pool = db::open(&db::default_db_path()).await?;
+    let store = KeychainStore;
+    auth::delete_token(&pool, &store, account_id).await
+}
+
+async fn handle_login_command(
+    terminal: &mut kodo_ui::Tui,
+    events: &mut EventHandler,
+    agent_tx: &mpsc::UnboundedSender<AgentEvent>,
+    provider: &str,
+    name: Option<String>,
+) -> Result<()> {
+    events.shutdown();
+    restore_terminal(terminal)?;
+
+    let login_result = login_provider(provider).await;
+
+    *terminal = init_terminal()?;
+    *events = EventHandler::new(EVENT_TICK_RATE);
+
+    match login_result {
+        Ok(account_id) => {
+            let _ = agent_tx.send(AgentEvent::LoginComplete { account_id, name });
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn login_provider(provider: &str) -> Result<String> {
+    let prompt = match provider {
+        "anthropic" => "Anthropic API key: ",
+        "openai" => "OpenAI API key or access token: ",
+        "gemini" => "Gemini API key: ",
+        "ollama" => bail!("`ollama` does not require login."),
+        other => bail!(
+            "Unknown provider `{other}`. Available providers: anthropic, openai, gemini, ollama."
+        ),
+    };
+
+    eprintln!("Logging in to `{provider}`. Credentials are stored in the OS keychain.");
+    let secret = prompt_password(prompt)?;
+    let secret = secret.trim().to_string();
+    if secret.is_empty() {
+        bail!("No credential entered.");
+    }
+
+    let pool = db::open(&db::default_db_path()).await?;
+    let store = KeychainStore;
+    auth::save_token(&pool, &store, provider, &secret, None, None).await?;
+    Ok(provider.to_string())
 }
