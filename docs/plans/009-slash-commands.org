@@ -261,8 +261,298 @@ Follows the same visual style as the existing command palette.
 - [X] Tab/Shift+Tab navigate completions
 - [X] Escape cancels without submitting
 
+* Skill Customisation
+
+Users can define custom slash commands by placing a ~SKILL.md~ file (following
+the [[https://agentskills.io][Agent Skills]] open standard) inside a ~skills/<name>/~ directory.  Kodo
+discovers skills at two scopes:
+
+| Scope    | Path                                   | Applies to         |
+|----------+----------------------------------------+--------------------|
+| Personal | ~~/.kodo/skills/<name>/SKILL.md~       | All projects       |
+| Project  | ~.kodo/skills/<name>/SKILL.md~         | This project only  |
+
+Project skills take precedence over personal ones when names collide.  Kodo
+also accepts the legacy flat layout ~.kodo/commands/<name>.md~ for backward
+compatibility; a same-name skill directory wins over a commands file.
+
+** TODO Step 11: ~SkillDef~ type and ~SKILL.md~ parser
+
+*What*: Parse a ~SKILL.md~ file into a typed ~SkillDef~ struct.  The file
+format is a YAML frontmatter block (between ~---~ markers) followed by
+free-form markdown body content.
+
+*File*: ~crates/kodo-ui/src/skills.rs~ (new file)
+
+Frontmatter fields to support:
+
+| Field                      | Type             | Default    |
+|----------------------------+------------------+------------|
+| ~name~                     | ~Option<String>~ | dir name   |
+| ~description~              | ~Option<String>~ | first para |
+| ~argument-hint~            | ~Option<String>~ | none       |
+| ~disable-model-invocation~ | ~bool~           | ~false~    |
+| ~user-invocable~           | ~bool~           | ~true~     |
+
+Structs / functions:
+
+- ~SkillFrontmatter~: serde-deserialised from the YAML block (all fields
+  optional).
+- ~SkillDef~: resolved struct with ~name: String~, ~description: String~,
+  ~argument_hint: Option<String>~, ~disable_model_invocation: bool~,
+  ~user_invocable: bool~, ~body: String~, ~base_dir: PathBuf~.
+  (~base_dir~ is the parent directory of the ~SKILL.md~ file; used to resolve
+  relative paths to supporting files and to allowlist reads.)
+- ~parse_skill_md(source: &str, fallback_name: &str, base_dir: PathBuf) -> Result<SkillDef>~:
+  - If content starts with ~---~, split at the closing ~---~ to extract YAML
+    and body; otherwise treat entire content as body with empty frontmatter.
+  - Deserialise the YAML block with ~serde_yaml~ (add dependency to
+    ~kodo-ui/Cargo.toml~).
+  - ~name~: use frontmatter value if present, else ~fallback_name~.
+  - ~description~: use frontmatter value if present, else first non-empty
+    paragraph of body (up to 250 chars).
+  - Boolean fields default as shown in the table above.
+  - Store ~base_dir~ verbatim on the struct.
+
+*Checklist*:
+- [ ] ~serde_yaml~ added to ~kodo-ui/Cargo.toml~
+- [ ] ~parse_skill_md~ with full frontmatter returns correct ~SkillDef~
+- [ ] ~parse_skill_md~ with no frontmatter uses ~fallback_name~ and first para
+- [ ] ~disable_model_invocation~ defaults to ~false~
+- [ ] ~user_invocable~ defaults to ~true~
+- [ ] ~SkillDef.base_dir~ equals the directory containing ~SKILL.md~
+- [ ] ~cargo test -p kodo-ui~ passes
+
+** TODO Step 12: Skill discovery
+
+*What*: Walk the two scope directories and produce a ~Vec<SkillDef>~.
+
+*File*: ~crates/kodo-ui/src/skills.rs~ (append)
+
+- ~load_skills(personal_dir: &Path, project_dir: &Path) -> Vec<SkillDef>~:
+  1. Collect entries from ~project_dir/skills/~ then ~personal_dir/skills/~.
+  2. For each entry that is a directory, look for ~<entry>/SKILL.md~; if
+     missing, skip silently.
+  3. Read the file, call ~parse_skill_md~; on error, log a warning and skip.
+  4. De-duplicate by name: project scope wins over personal.
+  5. Also scan ~project_dir/commands/*.md~ (legacy): for any name not already
+     in the list, parse with ~parse_skill_md(content, stem)~.
+- ~default_skill_dirs() -> (PathBuf, PathBuf)~: returns
+  ~(~/.kodo, <cwd>/.kodo)~; uses ~dirs::home_dir()~ (add ~dirs~ crate if not
+  already present).
+
+Export ~load_skills~ and ~SkillDef~ from ~kodo-ui/src/lib.rs~.
+
+*Checklist*:
+- [ ] ~load_skills~ returns skills from both scopes
+- [ ] Project-scope skill overrides personal skill of same name
+- [ ] Legacy ~.kodo/commands/deploy.md~ is picked up as ~/deploy~
+- [ ] Missing ~SKILL.md~ inside a skill dir is skipped without panic
+- [ ] ~cargo build -p kodo-ui~ succeeds
+
+** TODO Step 12b: Supporting-file enumeration
+
+*What*: After loading a ~SkillDef~, discover any optional supporting files in
+the three conventional subdirectories.  Files are enumerated but *not* read
+eagerly — the list is surfaced to the LLM at activation time so it knows what
+is available and can load individual files on demand.
+
+*File*: ~crates/kodo-ui/src/skills.rs~ (append)
+
+Conventional subdirectories (from the [[https://agentskills.io/specification][Agent Skills spec]]):
+
+| Directory     | Purpose                                   |
+|---------------+-------------------------------------------|
+| ~scripts/~    | Executable code (Python, Bash, etc.)      |
+| ~references/~ | Additional documentation / reference docs |
+| ~assets/~     | Templates, data files, static resources   |
+
+- ~SkillResources~ struct: ~scripts: Vec<PathBuf>~, ~references: Vec<PathBuf>~,
+  ~assets: Vec<PathBuf>~.
+- ~enumerate_resources(base_dir: &Path) -> SkillResources~:
+  - For each of the three subdirectory names, if the subdirectory exists, collect
+    all direct child *files* (non-recursive) as absolute paths.
+  - If a subdirectory is missing, the corresponding ~Vec~ is empty.
+  - Does not read file contents; records only paths.
+- Add ~resources: SkillResources~ to ~SkillDef~ (populated inside
+  ~load_skills~ after parsing).
+- ~SkillResources::is_empty(&self) -> bool~: true iff all three vecs are empty.
+
+*Checklist*:
+- [ ] ~SkillResources~ struct defined
+- [ ] ~enumerate_resources~ lists files in present subdirs; empty vec for absent ones
+- [ ] ~SkillDef.resources~ is populated in ~load_skills~
+- [ ] ~is_empty()~ returns true when no supporting files exist
+- [ ] Missing ~scripts/~, ~references/~, ~assets/~ do not cause errors
+- [ ] ~cargo test -p kodo-ui~ passes
+
+** TODO Step 13: Argument substitution
+
+*What*: Before injecting skill body into the conversation, replace placeholder
+tokens with actual argument values.
+
+*File*: ~crates/kodo-ui/src/skills.rs~ (append)
+
+- ~render_body(body: &str, raw_args: &str) -> String~:
+  - Tokenise ~raw_args~ with shell-style quoting (respect ~"…"~ and ~'…'~
+    as single tokens) into ~Vec<String>~.
+  - Replace ~$ARGUMENTS~ with ~raw_args~ verbatim.
+  - Replace ~$ARGUMENTS[N]~ with token at index ~N~ (empty string if out of
+    range).
+  - Replace ~$N~ (bare digit, e.g. ~$0~, ~$1~) with token at that index.
+  - If ~$ARGUMENTS~ does not appear in body at all and ~raw_args~ is
+    non-empty, append ~\nARGUMENTS: <raw_args>~ to the result.
+
+*Checklist*:
+- [ ] ~$ARGUMENTS~ replaced with full arg string
+- [ ] ~$ARGUMENTS[0]~ / ~$0~ gives first token; ~$1~ gives second
+- [ ] Quoted arg ~"hello world"~ counts as one token for ~$0~
+- [ ] Out-of-range ~$5~ on a one-arg invocation returns empty string
+- [ ] Body without ~$ARGUMENTS~ and non-empty args appends ~ARGUMENTS:~ line
+- [ ] ~cargo test -p kodo-ui~ passes
+
+** TODO Step 14: Integrate skills into the slash command registry
+
+*What*: Merge loaded ~SkillDef~ entries into the existing ~COMMANDS~ registry
+so they appear in autocomplete alongside built-ins.
+
+*Files*: ~crates/kodo-ui/src/slash.rs~, ~crates/kodo-ui/src/model.rs~
+
+Changes to ~slash.rs~:
+
+- Add ~CommandSource~ enum: ~Builtin~, ~Skill(SkillDef)~.
+- Extend ~SlashCommand~ with ~source: CommandSource~; built-ins use
+  ~CommandSource::Builtin~.
+- Replace the static ~COMMANDS~ slice with a runtime
+  ~Vec<SlashCommand>~ (lazily built or passed in at startup).
+- ~complete(prefix: &str, commands: &[SlashCommand]) -> Vec<&SlashCommand>~:
+  - For user-facing autocomplete: include only commands where
+    ~source == Builtin || skill.user_invocable~.
+  - Filter by name prefix as before.
+
+Changes to ~model.rs~:
+
+- Add ~commands: Vec<SlashCommand>~ to ~Model~; populated at startup by
+  calling ~load_skills~ and merging with built-ins.
+
+*Checklist*:
+- [ ] ~CommandSource~ enum defined with ~Builtin~ and ~Skill~ variants
+- [ ] ~SlashCommand~ carries ~source~
+- [ ] ~Model.commands~ is initialised at startup
+- [ ] A skill with ~user_invocable: false~ does not appear in autocomplete
+- [ ] Built-in commands still complete correctly
+- [ ] ~cargo build -p kodo-ui~ succeeds
+
+** TODO Step 15: Skill execution — inject body into conversation
+
+*What*: When ~SlashExecute~ fires for a skill command, render the skill body
+and prepend it to the next outbound message as injected context rather than
+running built-in logic.
+
+*File*: ~crates/kodo-ui/src/update.rs~
+
+In the ~SlashExecute~ handler, after matching ~name~:
+
+- If the matched command has ~source == CommandSource::Skill(def)~:
+  1. Render the body: ~let content = render_body(&def.body, &parsed.args_raw)~.
+  2. Append a resource manifest if ~!def.resources.is_empty()~:
+     #+begin_example
+     <skill_resources base_dir="/abs/path/to/skill/">
+       <scripts>scripts/run.py</scripts>
+       <references>references/REFERENCE.md</references>
+       <assets>assets/template.txt</assets>
+     </skill_resources>
+     #+end_example
+     Paths inside the tags are relative to ~base_dir~.  The manifest tells
+     the LLM what supporting files exist; it does *not* load their contents.
+  3. Store the combined text in ~Model.pending_skill_injection: Option<String>~.
+  4. Clear input and slash state as usual.
+- When the user subsequently submits a chat message (or immediately if the
+  skill body itself constitutes the full prompt), prepend the injection as an
+  additional ~Role::System~ (or ~Role::User~ with a separator comment) message
+  before the user turn; then clear ~pending_skill_injection~.
+- Allowlist ~def.base_dir~ in the session's file-read permission set so the
+  LLM can read any supporting file without an extra permission prompt.
+  (If kodo does not yet have per-directory file-read gating, record this as a
+  no-op placeholder and revisit when that feature lands.)
+
+*Checklist*:
+- [ ] ~pending_skill_injection: Option<String>~ added to ~Model~
+- [ ] Invoking a skill stores rendered body in ~pending_skill_injection~
+- [ ] Resource manifest appended when supporting files exist; omitted when empty
+- [ ] ~base_dir~ allowlisted in file-read permission set (or no-op noted)
+- [ ] Next submitted chat message includes the injection prepended
+- [ ] ~pending_skill_injection~ is cleared after injection
+- [ ] Built-in commands are unaffected
+- [ ] ~cargo build~ succeeds
+
+** TODO Step 16: Invocation control
+
+*What*: Honour ~disable_model_invocation~ and ~user_invocable~ at runtime.
+
+*File*: ~crates/kodo-ui/src/slash.rs~, ~crates/kodo-ui/src/update.rs~
+
+- ~disable_model_invocation~: descriptions of these skills are excluded from
+  any skill-listing context that would be exposed to the LLM (reserved for a
+  future model-invocation feature; for now, flag them in the help output with
+  a ~[manual]~ tag so users understand they are user-only).
+- ~user_invocable: false~: ~complete()~ already excludes these.  Also exclude
+  them from ~/help~ output.  They can still be injected programmatically if
+  kodo gains model-triggered skill invocation later.
+
+Update ~/help~ output (Step 7 handler) to:
+- Show ~[manual]~ tag after the description when ~disable_model_invocation~ is
+  true.
+- Omit skills where ~user_invocable~ is false.
+
+*Checklist*:
+- [ ] ~/help~ shows ~[manual]~ for skills with ~disable_model_invocation: true~
+- [ ] ~/help~ omits skills with ~user_invocable: false~
+- [ ] Autocomplete omits skills with ~user_invocable: false~
+- [ ] ~cargo build~ succeeds
+
+** TODO Step 17: End-to-end skill verification
+
+*What*: Integration test covering the full skill pipeline with a fixture skill.
+
+*File*: ~crates/kodo-ui/tests/skills_integration.rs~ (new file) or as
+doctests in ~skills.rs~
+
+Fixture skill (inline in test, written to a temp dir):
+
+#+begin_src yaml
+---
+name: greet
+description: Greet someone by name
+argument-hint: "[name]"
+---
+Hello, $ARGUMENTS! Welcome to kodo.
+
+See [reference guide](references/guide.md) for details.
+#+end_src
+
+Also create fixture supporting files in the temp dir:
+- ~greet/scripts/helper.sh~
+- ~greet/references/guide.md~
+- ~greet/assets/banner.txt~
+
+*Checklist*:
+- [ ] Fixture skill is discovered by ~load_skills~
+- [ ] ~/greet Alice~ renders to ~"Hello, Alice! Welcome to kodo."~
+- [ ] Skill appears in autocomplete as ~/greet~
+- [ ] ~def.resources~ lists all three fixture files
+- [ ] Skill injection includes ~<skill_resources>~ block with the three paths
+- [ ] Skill injection omits ~<skill_resources>~ for a skill with no supporting files
+- [ ] ~pending_skill_injection~ is cleared after injection
+- [ ] ~cargo test --workspace~ passes
+- [ ] ~cargo clippy --workspace~ no warnings
+
 * Future Work
 
-- *Custom slash commands*: let users define ~/~ commands in ~kodo.toml~.
 - *Argument completion*: after ~/model~, complete against ~available_models()~.
 - *History*: ~/~ re-opens last slash command for re-execution.
+- *Shell injection*: support ~!`command`~ preprocessing in skill bodies.
+- *Subagent context*: ~context: fork~ frontmatter field to run a skill in an
+  isolated subagent (depends on plan-005 subagent support).
+- *Live reload*: watch ~.kodo/skills/~ with ~notify~ and reload without
+  restart.
