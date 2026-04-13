@@ -167,7 +167,7 @@ pub fn format_resource_manifest(skill: &SkillDef) -> Option<String> {
 
     let mut lines = vec![format!(
         "<skill_resources base_dir=\"{}\">",
-        skill.base_dir.display()
+        path_to_manifest_string(&skill.base_dir)
     )];
     append_manifest_paths(
         &mut lines,
@@ -372,8 +372,44 @@ fn parse_arguments_index(remainder: &str) -> Option<(&str, usize)> {
 fn append_manifest_paths(lines: &mut Vec<String>, tag: &str, base_dir: &Path, paths: &[PathBuf]) {
     for path in paths {
         let relative = path.strip_prefix(base_dir).unwrap_or(path);
-        lines.push(format!("<{tag}>{}</{tag}>", relative.display()));
+        lines.push(format!(
+            "<{tag}>{}</{tag}>",
+            path_to_manifest_string(relative)
+        ));
     }
+}
+
+fn path_to_manifest_string(path: &Path) -> String {
+    use std::path::Component;
+
+    let mut rendered = String::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                rendered.push_str(&prefix.as_os_str().to_string_lossy());
+            }
+            Component::RootDir => {
+                if !rendered.ends_with('/') {
+                    rendered.push('/');
+                }
+            }
+            Component::CurDir => push_manifest_component(&mut rendered, "."),
+            Component::ParentDir => push_manifest_component(&mut rendered, ".."),
+            Component::Normal(segment) => {
+                push_manifest_component(&mut rendered, &segment.to_string_lossy())
+            }
+        }
+    }
+
+    rendered
+}
+
+fn push_manifest_component(rendered: &mut String, component: &str) {
+    if !rendered.is_empty() && !rendered.ends_with('/') && !rendered.ends_with(':') {
+        rendered.push('/');
+    }
+    rendered.push_str(component);
 }
 
 #[cfg(test)]
