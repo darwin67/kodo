@@ -98,7 +98,14 @@ fn render_output(frame: &mut Frame, model: &Model, area: Rect) {
             ChatRole::User => ("you> ", model.theme.user_style()),
             ChatRole::Assistant => ("kodo> ", model.theme.assistant_style()),
             ChatRole::Tool => ("  [tool] ", model.theme.tool_style()),
-            ChatRole::System => ("", model.theme.muted_style()),
+            ChatRole::System => ("", model.theme.text_style()),
+        };
+        let content_style = match msg.role {
+            ChatRole::System if msg.content.starts_with("[debug]") => model
+                .theme
+                .muted_style()
+                .add_modifier(Modifier::ITALIC | Modifier::DIM),
+            _ => style,
         };
 
         // Parse message content with syntax highlighting for assistant messages
@@ -108,7 +115,7 @@ fn render_output(frame: &mut Frame, model: &Model, area: Rect) {
             // For non-assistant messages, use simple line splitting
             msg.content
                 .lines()
-                .map(|line| Line::from(line.to_string()))
+                .map(|line| Line::styled(line.to_string(), content_style))
                 .collect()
         };
 
