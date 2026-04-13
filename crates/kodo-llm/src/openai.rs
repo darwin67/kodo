@@ -326,7 +326,9 @@ impl OpenAiProvider {
 
     fn ensure_api_key(&self) -> Result<()> {
         if self.api_key.trim().is_empty() {
-            bail!("OpenAI API key not configured. Set OPENAI_API_KEY or start with --provider ollama");
+            bail!(
+                "OpenAI API key not configured. Set OPENAI_API_KEY or start with --provider ollama"
+            );
         }
         Ok(())
     }

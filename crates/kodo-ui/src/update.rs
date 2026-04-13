@@ -1,7 +1,8 @@
 use crate::command::Command;
 use crate::message::{Message, ThemeChoice};
 use crate::model::{ChatMessage, ChatRole, Model};
-use crate::slash::{self, COMMANDS};
+use crate::skills;
+use crate::slash::{self, CommandSource};
 use crate::theme::Theme;
 use kodo_llm::models::available_models;
 
@@ -230,9 +231,7 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
 
         Message::AgentDiagnostics { summary, count } => {
             if model.debug_mode {
-                model
-                    .debug_logs
-                    .push(format!("LSP: {count} diagnostic(s)"));
+                model.debug_logs.push(format!("LSP: {count} diagnostic(s)"));
             }
             if count > 0 {
                 push_system_message(model, summary);
@@ -274,6 +273,17 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
                     .join("\n");
                 push_system_message(model, format!("Connected providers:\n{providers}"));
             }
+            vec![Command::None]
+        }
+
+        Message::LoginComplete { account_id, name } => {
+            let mut message = format!("Logged in `{account_id}`.");
+            if let Some(name) = name {
+                message.push_str(&format!(
+                    " Account labels are not persisted yet, so `{name}` is only acknowledged for now."
+                ));
+            }
+            push_system_message(model, message);
             vec![Command::None]
         }
 
@@ -354,21 +364,33 @@ fn handle_palette_backspace(model: &mut Model) -> Vec<Command> {
 }
 
 fn handle_input_submit(model: &mut Model) -> Vec<Command> {
-    if model.input.trim().is_empty() {
+    if model.input.trim().is_empty() && model.pending_skill_injection.is_none() {
         return vec![Command::None];
     }
 
     let user_input = std::mem::take(&mut model.input);
-    model.messages.push(ChatMessage {
-        role: ChatRole::User,
-        content: user_input.clone(),
-    });
+    if !user_input.trim().is_empty() {
+        model.messages.push(ChatMessage {
+            role: ChatRole::User,
+            content: user_input.clone(),
+        });
+    }
 
     model.cursor_pos = 0;
     model.scroll_offset = 0;
     model.slash_state = None;
 
-    vec![Command::send_to_agent(user_input)]
+    let outbound_message = if let Some(injection) = model.pending_skill_injection.take() {
+        if user_input.trim().is_empty() {
+            injection
+        } else {
+            format!("{injection}\n\n{user_input}")
+        }
+    } else {
+        user_input
+    };
+
+    vec![Command::send_to_agent(outbound_message)]
 }
 
 fn handle_slash_nav(model: &mut Model, delta: i32) -> Vec<Command> {
@@ -392,92 +414,107 @@ fn handle_slash_execute(model: &mut Model) -> Vec<Command> {
     }
 
     let parsed = slash::parse(&model.input);
-    let selected_name = model
+    let selected_command = model
         .slash_state
         .as_ref()
         .and_then(|state| state.completions.get(state.selected))
-        .map(|command| command.name);
+        .and_then(|command_index| model.commands.get(*command_index))
+        .cloned();
 
-    let command_name = if COMMANDS.iter().any(|command| command.name == parsed.name) {
-        parsed.name
-    } else if let Some(selected_name) = selected_name {
-        selected_name.to_string()
-    } else {
-        parsed.name
-    };
-    let args = parsed.args;
+    let exact_command = slash::find_user_command(&model.commands, &parsed.name).cloned();
+    let command = exact_command.or(selected_command);
 
     model.input.clear();
     model.cursor_pos = 0;
     model.slash_state = None;
 
-    match command_name.as_str() {
-        "help" => {
-            push_system_message(model, slash::format_help());
+    let Some(command) = command else {
+        push_system_message(model, format!("Unknown slash command `/{}`.", parsed.name));
+        return vec![Command::None];
+    };
+
+    match command.source {
+        CommandSource::Skill(skill) => {
+            model.pending_skill_injection = Some(build_skill_injection(&skill, &parsed.args_raw));
             vec![Command::None]
         }
-        "clear" => {
-            model.messages.clear();
-            model.streaming_text.clear();
-            model.scroll_offset = 0;
-            vec![Command::ClearConversation]
-        }
-        "compact" => {
-            push_system_message(model, "Context compaction is not implemented yet.".to_string());
-            vec![Command::None]
-        }
-        "model" => {
-            if let Some(model_id) = args.first() {
-                if model_is_known_for_provider(&model.provider, model_id) {
-                    model.model_name = model_id.clone();
-                    push_system_message(model, format!("Switched model to `{model_id}`."));
-                    vec![Command::SetModel(model_id.clone())]
+        CommandSource::Builtin => match command.name.as_str() {
+            "help" => {
+                push_system_message(model, slash::format_help(&model.commands));
+                vec![Command::None]
+            }
+            "clear" => {
+                model.messages.clear();
+                model.streaming_text.clear();
+                model.scroll_offset = 0;
+                model.pending_skill_injection = None;
+                vec![Command::ClearConversation]
+            }
+            "compact" => {
+                push_system_message(
+                    model,
+                    "Context compaction is not implemented yet.".to_string(),
+                );
+                vec![Command::None]
+            }
+            "model" => {
+                if let Some(model_id) = parsed.args.first() {
+                    if model_is_known_for_provider(&model.provider, model_id) {
+                        model.model_name = model_id.clone();
+                        push_system_message(model, format!("Switched model to `{model_id}`."));
+                        vec![Command::SetModel(model_id.clone())]
+                    } else {
+                        push_system_message(
+                            model,
+                            format!(
+                                "Unknown model `{model_id}` for provider `{}`.",
+                                model.provider
+                            ),
+                        );
+                        vec![Command::None]
+                    }
                 } else {
                     push_system_message(
                         model,
                         format!(
-                            "Unknown model `{model_id}` for provider `{}`.",
-                            model.provider
+                            "Current model: `{}` / `{}`.",
+                            model.provider, model.model_name
                         ),
                     );
                     vec![Command::None]
                 }
-            } else {
-                push_system_message(
-                    model,
-                    format!("Current model: `{}` / `{}`.", model.provider, model.model_name),
-                );
+            }
+            "providers" => vec![Command::ListProviders],
+            "login" => {
+                if let Some(provider) = parsed.args.first() {
+                    let name = parsed.args.get(1).cloned();
+                    vec![Command::LoginProvider {
+                        provider: provider.clone(),
+                        name,
+                    }]
+                } else {
+                    push_system_message(model, "Usage: /login <provider> [name]".to_string());
+                    vec![Command::None]
+                }
+            }
+            "logout" => {
+                if let Some(account_id) = parsed.args.first() {
+                    vec![Command::LogoutProvider(account_id.clone())]
+                } else {
+                    push_system_message(model, "Usage: /logout <account_id>".to_string());
+                    vec![Command::None]
+                }
+            }
+            other => {
+                push_system_message(model, format!("Unknown slash command `/{other}`."));
                 vec![Command::None]
             }
-        }
-        "providers" => vec![Command::ListProviders],
-        "login" => {
-            let provider = args.first().map(String::as_str).unwrap_or("<provider>");
-            push_system_message(
-                model,
-                format!(
-                    "`/login {provider}` is not wired yet. The slash UI is ready, but provider login still needs backend support."
-                ),
-            );
-            vec![Command::None]
-        }
-        "logout" => {
-            if let Some(account_id) = args.first() {
-                vec![Command::LogoutProvider(account_id.clone())]
-            } else {
-                push_system_message(model, "Usage: /logout <account_id>".to_string());
-                vec![Command::None]
-            }
-        }
-        other => {
-            push_system_message(model, format!("Unknown slash command `/{other}`."));
-            vec![Command::None]
-        }
+        },
     }
 }
 
 fn sync_slash_state(model: &mut Model) {
-    model.slash_state = slash::state_for_input(&model.input);
+    model.slash_state = slash::state_for_input(&model.input, &model.commands);
 }
 
 fn model_is_known_for_provider(provider: &str, model_id: &str) -> bool {
@@ -492,6 +529,24 @@ fn push_system_message(model: &mut Model, content: String) {
         content,
     });
     model.scroll_offset = 0;
+}
+
+fn build_skill_injection(skill: &skills::SkillDef, raw_args: &str) -> String {
+    let mut injection = skills::render_body(&skill.body, raw_args);
+
+    if let Some(manifest) = skills::format_resource_manifest(skill) {
+        if !injection.ends_with('\n') && !injection.is_empty() {
+            injection.push('\n');
+        }
+        if !injection.is_empty() {
+            injection.push('\n');
+        }
+        injection.push_str(&manifest);
+    }
+
+    // Per-directory read allowlisting does not exist yet, so base_dir is only
+    // surfaced in the injection manifest for now.
+    injection
 }
 
 fn handle_palette_select(model: &mut Model) -> Vec<Command> {
@@ -522,6 +577,10 @@ fn handle_palette_select(model: &mut Model) -> Vec<Command> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use crate::skills::{SkillDef, SkillResources};
+
     use super::*;
 
     #[test]
@@ -608,7 +667,7 @@ mod tests {
         update(&mut model, Message::KeyInput('/'));
 
         let state = model.slash_state.as_ref().unwrap();
-        assert_eq!(state.completions.len(), slash::COMMANDS.len());
+        assert_eq!(state.completions.len(), model.commands.len());
     }
 
     #[test]
@@ -616,7 +675,7 @@ mod tests {
         let mut model = Model::new(false);
         model.input = "/".to_string();
         model.cursor_pos = 1;
-        model.slash_state = slash::state_for_input(&model.input);
+        model.slash_state = slash::state_for_input(&model.input, &model.commands);
 
         update(&mut model, Message::Backspace);
 
@@ -629,12 +688,19 @@ mod tests {
         let mut model = Model::new(false);
         model.input = "/help".to_string();
         model.cursor_pos = model.input.len();
-        model.slash_state = slash::state_for_input(&model.input);
+        model.slash_state = slash::state_for_input(&model.input, &model.commands);
 
         let commands = update(&mut model, Message::SlashExecute);
 
         assert!(commands.iter().all(|command| command.is_none()));
-        assert!(model.messages.last().unwrap().content.contains("Available slash commands:"));
+        assert!(
+            model
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Available slash commands:")
+        );
     }
 
     #[test]
@@ -644,11 +710,18 @@ mod tests {
         model.model_name = "gpt-4o".to_string();
         model.input = "/model".to_string();
         model.cursor_pos = model.input.len();
-        model.slash_state = slash::state_for_input(&model.input);
+        model.slash_state = slash::state_for_input(&model.input, &model.commands);
 
         update(&mut model, Message::SlashExecute);
 
-        assert!(model.messages.last().unwrap().content.contains("Current model"));
+        assert!(
+            model
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Current model")
+        );
     }
 
     #[test]
@@ -657,7 +730,7 @@ mod tests {
         model.provider = "openai".to_string();
         model.input = "/model gpt-4o-mini".to_string();
         model.cursor_pos = model.input.len();
-        model.slash_state = slash::state_for_input(&model.input);
+        model.slash_state = slash::state_for_input(&model.input, &model.commands);
 
         let commands = update(&mut model, Message::SlashExecute);
 
@@ -671,7 +744,7 @@ mod tests {
         let mut model = Model::new(false);
         model.input = "/providers".to_string();
         model.cursor_pos = model.input.len();
-        model.slash_state = slash::state_for_input(&model.input);
+        model.slash_state = slash::state_for_input(&model.input, &model.commands);
 
         let commands = update(&mut model, Message::SlashExecute);
 
@@ -679,15 +752,75 @@ mod tests {
     }
 
     #[test]
+    fn test_slash_login_dispatches_runtime_command() {
+        let mut model = Model::new(false);
+        model.input = "/login openai Work".to_string();
+        model.cursor_pos = model.input.len();
+        model.slash_state = slash::state_for_input(&model.input, &model.commands);
+
+        let commands = update(&mut model, Message::SlashExecute);
+
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::LoginProvider { provider, name }]
+            if provider == "openai" && name.as_deref() == Some("Work")
+        ));
+    }
+
+    #[test]
     fn test_slash_logout_dispatches_runtime_command() {
         let mut model = Model::new(false);
         model.input = "/logout openai".to_string();
         model.cursor_pos = model.input.len();
-        model.slash_state = slash::state_for_input(&model.input);
+        model.slash_state = slash::state_for_input(&model.input, &model.commands);
 
         let commands = update(&mut model, Message::SlashExecute);
 
-        assert!(matches!(commands.as_slice(), [Command::LogoutProvider(account)] if account == "openai"));
+        assert!(
+            matches!(commands.as_slice(), [Command::LogoutProvider(account)] if account == "openai")
+        );
+    }
+
+    #[test]
+    fn test_skill_execution_stores_pending_injection() {
+        let mut model = Model::new(false);
+        model.commands = slash::merge_commands(vec![SkillDef {
+            name: "greet".to_string(),
+            description: "Greet somebody".to_string(),
+            argument_hint: Some("[name]".to_string()),
+            disable_model_invocation: false,
+            user_invocable: true,
+            body: "Hello, $ARGUMENTS!".to_string(),
+            base_dir: PathBuf::from("/tmp/greet"),
+            resources: SkillResources::default(),
+        }]);
+        model.input = "/greet Alice".to_string();
+        model.cursor_pos = model.input.len();
+        model.slash_state = slash::state_for_input(&model.input, &model.commands);
+
+        let commands = update(&mut model, Message::SlashExecute);
+
+        assert!(commands.iter().all(|command| command.is_none()));
+        assert_eq!(
+            model.pending_skill_injection.as_deref(),
+            Some("Hello, Alice!")
+        );
+    }
+
+    #[test]
+    fn test_pending_skill_injection_is_prepended_on_submit() {
+        let mut model = Model::new(false);
+        model.pending_skill_injection = Some("System skill context".to_string());
+        model.input = "Do the task".to_string();
+
+        let commands = update(&mut model, Message::Submit);
+
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::SendToAgent(outbound)]
+            if outbound == "System skill context\n\nDo the task"
+        ));
+        assert!(model.pending_skill_injection.is_none());
     }
 
     #[test]
@@ -695,15 +828,17 @@ mod tests {
         let mut model = Model::new(false);
         model.input = "/wat".to_string();
         model.cursor_pos = model.input.len();
-        model.slash_state = slash::state_for_input(&model.input);
+        model.slash_state = slash::state_for_input(&model.input, &model.commands);
 
         update(&mut model, Message::SlashExecute);
 
-        assert!(model
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .contains("Unknown slash command"));
+        assert!(
+            model
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Unknown slash command")
+        );
     }
 }

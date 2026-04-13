@@ -93,6 +93,11 @@ pub enum Message {
     Notice(String),
     /// Runtime listed providers from the auth store
     ProvidersListed(Vec<String>),
+    /// Runtime completed a login request
+    LoginComplete {
+        account_id: String,
+        name: Option<String>,
+    },
     /// Runtime completed a logout request
     LogoutComplete(String),
 

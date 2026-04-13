@@ -1,6 +1,6 @@
 use crate::{
     keybinds::{KeyBindRegistry, LeaderState},
-    slash::SlashState,
+    slash::{SlashCommand, SlashState, builtin_commands},
     syntax::SyntaxHighlighter,
     theme::Theme,
 };
@@ -65,8 +65,12 @@ pub struct Model {
     pub palette_selected: usize,
 
     // -- Slash command state --
+    /// Available slash commands, including discovered skills.
+    pub commands: Vec<SlashCommand>,
     /// Active slash command autocomplete state
     pub slash_state: Option<SlashState>,
+    /// Pending skill text to prepend to the next outbound message.
+    pub pending_skill_injection: Option<String>,
 
     // -- Debug state --
     /// Whether debug mode is enabled (--debug flag)
@@ -123,7 +127,9 @@ impl Model {
             palette_selected: 0,
 
             // Slash state
+            commands: builtin_commands(),
             slash_state: None,
+            pending_skill_injection: None,
 
             // Debug state
             debug_mode,

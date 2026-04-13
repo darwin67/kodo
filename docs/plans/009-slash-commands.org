@@ -161,7 +161,7 @@ Add to ~Msg~:
 - [X] All three variants exist in ~Msg~
 - [X] ~cargo build -p kodo-ui~ succeeds
 
-** TODO Step 7: Update handler — navigation and dispatch
+** DONE Step 7: Update handler — navigation and dispatch
 
 *What*: Handle slash ~Msg~ variants in ~update.rs~ and route to command logic.
 
@@ -198,7 +198,7 @@ Also intercept Enter key in ~update.rs~: if ~slash_state.is_some()~, dispatch
 - [X] ~/model~ without arg appends current model to messages
 - [X] ~/model gpt-4o~ dispatches ~SetModel~
 - [X] ~/providers~ dispatches ~ListProviders~ and formats result
-- [ ] ~/login openai~ dispatches ~LoginProvider~
+- [X] ~/login openai~ dispatches ~LoginProvider~
 - [X] ~/logout <id>~ dispatches ~LogoutProvider~
 - [X] Unknown command appends error message
 - [X] Enter in slash mode executes instead of submitting chat
@@ -246,7 +246,7 @@ Follows the same visual style as the existing command palette.
 - [X] At most 7 items shown (scroll if more)
 - [X] ~cargo build~ succeeds
 
-** TODO Step 10: Final verification
+** DONE Step 10: Final verification
 
 *Checklist*:
 - [X] ~cargo build~ clean
@@ -256,7 +256,7 @@ Follows the same visual style as the existing command palette.
 - [X] ~/clear~ empties the chat
 - [X] ~/model~ shows current model; ~/model gpt-4o~ switches it
 - [X] ~/providers~ lists connected accounts
-- [ ] ~/login anthropic MyKey~ adds an account
+- [X] ~/login anthropic MyKey~ adds an account
 - [X] ~/logout <id>~ removes the account
 - [X] Tab/Shift+Tab navigate completions
 - [X] Escape cancels without submitting
@@ -276,7 +276,7 @@ Project skills take precedence over personal ones when names collide.  Kodo
 also accepts the legacy flat layout ~.kodo/commands/<name>.md~ for backward
 compatibility; a same-name skill directory wins over a commands file.
 
-** TODO Step 11: ~SkillDef~ type and ~SKILL.md~ parser
+** DONE Step 11: ~SkillDef~ type and ~SKILL.md~ parser
 
 *What*: Parse a ~SKILL.md~ file into a typed ~SkillDef~ struct.  The file
 format is a YAML frontmatter block (between ~---~ markers) followed by
@@ -315,15 +315,15 @@ Structs / functions:
   - Store ~base_dir~ verbatim on the struct.
 
 *Checklist*:
-- [ ] ~serde_yaml~ added to ~kodo-ui/Cargo.toml~
-- [ ] ~parse_skill_md~ with full frontmatter returns correct ~SkillDef~
-- [ ] ~parse_skill_md~ with no frontmatter uses ~fallback_name~ and first para
-- [ ] ~disable_model_invocation~ defaults to ~false~
-- [ ] ~user_invocable~ defaults to ~true~
-- [ ] ~SkillDef.base_dir~ equals the directory containing ~SKILL.md~
-- [ ] ~cargo test -p kodo-ui~ passes
+- [X] ~serde_yaml~ added to ~kodo-ui/Cargo.toml~
+- [X] ~parse_skill_md~ with full frontmatter returns correct ~SkillDef~
+- [X] ~parse_skill_md~ with no frontmatter uses ~fallback_name~ and first para
+- [X] ~disable_model_invocation~ defaults to ~false~
+- [X] ~user_invocable~ defaults to ~true~
+- [X] ~SkillDef.base_dir~ equals the directory containing ~SKILL.md~
+- [X] ~cargo test -p kodo-ui~ passes
 
-** TODO Step 12: Skill discovery
+** DONE Step 12: Skill discovery
 
 *What*: Walk the two scope directories and produce a ~Vec<SkillDef>~.
 
@@ -344,13 +344,13 @@ Structs / functions:
 Export ~load_skills~ and ~SkillDef~ from ~kodo-ui/src/lib.rs~.
 
 *Checklist*:
-- [ ] ~load_skills~ returns skills from both scopes
-- [ ] Project-scope skill overrides personal skill of same name
-- [ ] Legacy ~.kodo/commands/deploy.md~ is picked up as ~/deploy~
-- [ ] Missing ~SKILL.md~ inside a skill dir is skipped without panic
-- [ ] ~cargo build -p kodo-ui~ succeeds
+- [X] ~load_skills~ returns skills from both scopes
+- [X] Project-scope skill overrides personal skill of same name
+- [X] Legacy ~.kodo/commands/deploy.md~ is picked up as ~/deploy~
+- [X] Missing ~SKILL.md~ inside a skill dir is skipped without panic
+- [X] ~cargo build -p kodo-ui~ succeeds
 
-** TODO Step 12b: Supporting-file enumeration
+** DONE Step 12b: Supporting-file enumeration
 
 *What*: After loading a ~SkillDef~, discover any optional supporting files in
 the three conventional subdirectories.  Files are enumerated but *not* read
@@ -379,14 +379,14 @@ Conventional subdirectories (from the [[https://agentskills.io/specification][Ag
 - ~SkillResources::is_empty(&self) -> bool~: true iff all three vecs are empty.
 
 *Checklist*:
-- [ ] ~SkillResources~ struct defined
-- [ ] ~enumerate_resources~ lists files in present subdirs; empty vec for absent ones
-- [ ] ~SkillDef.resources~ is populated in ~load_skills~
-- [ ] ~is_empty()~ returns true when no supporting files exist
-- [ ] Missing ~scripts/~, ~references/~, ~assets/~ do not cause errors
-- [ ] ~cargo test -p kodo-ui~ passes
+- [X] ~SkillResources~ struct defined
+- [X] ~enumerate_resources~ lists files in present subdirs; empty vec for absent ones
+- [X] ~SkillDef.resources~ is populated in ~load_skills~
+- [X] ~is_empty()~ returns true when no supporting files exist
+- [X] Missing ~scripts/~, ~references/~, ~assets/~ do not cause errors
+- [X] ~cargo test -p kodo-ui~ passes
 
-** TODO Step 13: Argument substitution
+** DONE Step 13: Argument substitution
 
 *What*: Before injecting skill body into the conversation, replace placeholder
 tokens with actual argument values.
@@ -404,14 +404,14 @@ tokens with actual argument values.
     non-empty, append ~\nARGUMENTS: <raw_args>~ to the result.
 
 *Checklist*:
-- [ ] ~$ARGUMENTS~ replaced with full arg string
-- [ ] ~$ARGUMENTS[0]~ / ~$0~ gives first token; ~$1~ gives second
-- [ ] Quoted arg ~"hello world"~ counts as one token for ~$0~
-- [ ] Out-of-range ~$5~ on a one-arg invocation returns empty string
-- [ ] Body without ~$ARGUMENTS~ and non-empty args appends ~ARGUMENTS:~ line
-- [ ] ~cargo test -p kodo-ui~ passes
+- [X] ~$ARGUMENTS~ replaced with full arg string
+- [X] ~$ARGUMENTS[0]~ / ~$0~ gives first token; ~$1~ gives second
+- [X] Quoted arg ~"hello world"~ counts as one token for ~$0~
+- [X] Out-of-range ~$5~ on a one-arg invocation returns empty string
+- [X] Body without ~$ARGUMENTS~ and non-empty args appends ~ARGUMENTS:~ line
+- [X] ~cargo test -p kodo-ui~ passes
 
-** TODO Step 14: Integrate skills into the slash command registry
+** DONE Step 14: Integrate skills into the slash command registry
 
 *What*: Merge loaded ~SkillDef~ entries into the existing ~COMMANDS~ registry
 so they appear in autocomplete alongside built-ins.
@@ -436,14 +436,14 @@ Changes to ~model.rs~:
   calling ~load_skills~ and merging with built-ins.
 
 *Checklist*:
-- [ ] ~CommandSource~ enum defined with ~Builtin~ and ~Skill~ variants
-- [ ] ~SlashCommand~ carries ~source~
-- [ ] ~Model.commands~ is initialised at startup
-- [ ] A skill with ~user_invocable: false~ does not appear in autocomplete
-- [ ] Built-in commands still complete correctly
-- [ ] ~cargo build -p kodo-ui~ succeeds
+- [X] ~CommandSource~ enum defined with ~Builtin~ and ~Skill~ variants
+- [X] ~SlashCommand~ carries ~source~
+- [X] ~Model.commands~ is initialised at startup
+- [X] A skill with ~user_invocable: false~ does not appear in autocomplete
+- [X] Built-in commands still complete correctly
+- [X] ~cargo build -p kodo-ui~ succeeds
 
-** TODO Step 15: Skill execution — inject body into conversation
+** DONE Step 15: Skill execution — inject body into conversation
 
 *What*: When ~SlashExecute~ fires for a skill command, render the skill body
 and prepend it to the next outbound message as injected context rather than
@@ -477,16 +477,16 @@ In the ~SlashExecute~ handler, after matching ~name~:
   no-op placeholder and revisit when that feature lands.)
 
 *Checklist*:
-- [ ] ~pending_skill_injection: Option<String>~ added to ~Model~
-- [ ] Invoking a skill stores rendered body in ~pending_skill_injection~
-- [ ] Resource manifest appended when supporting files exist; omitted when empty
-- [ ] ~base_dir~ allowlisted in file-read permission set (or no-op noted)
-- [ ] Next submitted chat message includes the injection prepended
-- [ ] ~pending_skill_injection~ is cleared after injection
-- [ ] Built-in commands are unaffected
-- [ ] ~cargo build~ succeeds
+- [X] ~pending_skill_injection: Option<String>~ added to ~Model~
+- [X] Invoking a skill stores rendered body in ~pending_skill_injection~
+- [X] Resource manifest appended when supporting files exist; omitted when empty
+- [X] ~base_dir~ allowlisted in file-read permission set (or no-op noted)
+- [X] Next submitted chat message includes the injection prepended
+- [X] ~pending_skill_injection~ is cleared after injection
+- [X] Built-in commands are unaffected
+- [X] ~cargo build~ succeeds
 
-** TODO Step 16: Invocation control
+** DONE Step 16: Invocation control
 
 *What*: Honour ~disable_model_invocation~ and ~user_invocable~ at runtime.
 
@@ -506,12 +506,12 @@ Update ~/help~ output (Step 7 handler) to:
 - Omit skills where ~user_invocable~ is false.
 
 *Checklist*:
-- [ ] ~/help~ shows ~[manual]~ for skills with ~disable_model_invocation: true~
-- [ ] ~/help~ omits skills with ~user_invocable: false~
-- [ ] Autocomplete omits skills with ~user_invocable: false~
-- [ ] ~cargo build~ succeeds
+- [X] ~/help~ shows ~[manual]~ for skills with ~disable_model_invocation: true~
+- [X] ~/help~ omits skills with ~user_invocable: false~
+- [X] Autocomplete omits skills with ~user_invocable: false~
+- [X] ~cargo build~ succeeds
 
-** TODO Step 17: End-to-end skill verification
+** DONE Step 17: End-to-end skill verification
 
 *What*: Integration test covering the full skill pipeline with a fixture skill.
 
@@ -537,15 +537,15 @@ Also create fixture supporting files in the temp dir:
 - ~greet/assets/banner.txt~
 
 *Checklist*:
-- [ ] Fixture skill is discovered by ~load_skills~
-- [ ] ~/greet Alice~ renders to ~"Hello, Alice! Welcome to kodo."~
-- [ ] Skill appears in autocomplete as ~/greet~
-- [ ] ~def.resources~ lists all three fixture files
-- [ ] Skill injection includes ~<skill_resources>~ block with the three paths
-- [ ] Skill injection omits ~<skill_resources>~ for a skill with no supporting files
-- [ ] ~pending_skill_injection~ is cleared after injection
-- [ ] ~cargo test --workspace~ passes
-- [ ] ~cargo clippy --workspace~ no warnings
+- [X] Fixture skill is discovered by ~load_skills~
+- [X] ~/greet Alice~ renders to ~"Hello, Alice! Welcome to kodo."~
+- [X] Skill appears in autocomplete as ~/greet~
+- [X] ~def.resources~ lists all three fixture files
+- [X] Skill injection includes ~<skill_resources>~ block with the three paths
+- [X] Skill injection omits ~<skill_resources>~ for a skill with no supporting files
+- [X] ~pending_skill_injection~ is cleared after injection
+- [X] ~cargo test --workspace~ passes
+- [X] ~cargo clippy --workspace~ no warnings
 
 * Future Work
 

@@ -25,6 +25,12 @@ pub enum Command {
     /// List configured providers from the auth store.
     ListProviders,
 
+    /// Add credentials for a provider, optionally carrying a user-visible label.
+    LoginProvider {
+        provider: String,
+        name: Option<String>,
+    },
+
     /// Remove stored credentials for a provider/account identifier.
     LogoutProvider(String),
 

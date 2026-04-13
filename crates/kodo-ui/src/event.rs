@@ -25,6 +25,8 @@ pub enum Event {
 pub struct EventHandler {
     rx: mpsc::UnboundedReceiver<Event>,
     _tx: mpsc::UnboundedSender<Event>,
+    stop_tx: Option<std::sync::mpsc::Sender<()>>,
+    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl EventHandler {
@@ -32,9 +34,14 @@ impl EventHandler {
     pub fn new(tick_rate: Duration) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let _tx = tx.clone();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
 
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             loop {
+                if stop_rx.try_recv().is_ok() {
+                    break;
+                }
+
                 if event::poll(tick_rate).unwrap_or(false) {
                     match event::read() {
                         Ok(CrosstermEvent::Key(key)) => {
@@ -56,7 +63,12 @@ impl EventHandler {
             }
         });
 
-        Self { rx, _tx }
+        Self {
+            rx,
+            _tx,
+            stop_tx: Some(stop_tx),
+            handle: Some(handle),
+        }
     }
 
     /// Receive the next event (async).
@@ -65,6 +77,22 @@ impl EventHandler {
             .recv()
             .await
             .ok_or_else(|| anyhow::anyhow!("event channel closed"))
+    }
+
+    pub fn shutdown(&mut self) {
+        if let Some(stop_tx) = self.stop_tx.take() {
+            let _ = stop_tx.send(());
+        }
+
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for EventHandler {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -260,7 +288,7 @@ mod tests {
     fn test_slash_tab_navigates_instead_of_toggling_mode() {
         let mut model = test_model();
         model.input = "/".to_string();
-        model.slash_state = crate::slash::state_for_input(&model.input);
+        model.slash_state = crate::slash::state_for_input(&model.input, &model.commands);
 
         let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
         let event = Event::Key(key);
@@ -273,7 +301,7 @@ mod tests {
     fn test_slash_enter_executes_command() {
         let mut model = test_model();
         model.input = "/help".to_string();
-        model.slash_state = crate::slash::state_for_input(&model.input);
+        model.slash_state = crate::slash::state_for_input(&model.input, &model.commands);
 
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let event = Event::Key(key);

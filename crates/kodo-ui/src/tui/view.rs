@@ -46,8 +46,8 @@ pub fn view(frame: &mut Frame, model: &Model) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Status bar
-            Constraint::Min(1),    // Output/chat area
+            Constraint::Length(1),                // Status bar
+            Constraint::Min(1),                   // Output/chat area
             Constraint::Length(3 + slash_height), // Input area
         ])
         .split(main_area);
@@ -228,10 +228,7 @@ fn render_input(frame: &mut Frame, model: &Model, area: Rect) {
 
     // Position cursor inside the input box
     if !model.is_streaming {
-        frame.set_cursor_position((
-            input_area.x + model.cursor_pos as u16 + 1,
-            input_area.y + 1,
-        ));
+        frame.set_cursor_position((input_area.x + model.cursor_pos as u16 + 1, input_area.y + 1));
     }
 }
 
@@ -240,15 +237,16 @@ fn render_slash_completions(frame: &mut Frame, model: &Model, area: Rect) {
         return;
     };
 
-    let selected = state.selected.min(state.completions.len().saturating_sub(1));
+    let selected = state
+        .selected
+        .min(state.completions.len().saturating_sub(1));
     let mut lines = Vec::new();
 
-    for (index, command) in state.completions.iter().take(7).enumerate() {
-        let signature = if command.args.is_empty() {
-            format!("/{}", command.name)
-        } else {
-            format!("/{} {}", command.name, command.args)
+    for (index, command_index) in state.completions.iter().take(7).enumerate() {
+        let Some(command) = model.commands.get(*command_index) else {
+            continue;
         };
+        let signature = command.signature();
 
         let style = if index == selected {
             model.theme.accent_style().add_modifier(Modifier::REVERSED)
