@@ -18,7 +18,7 @@ use kodo_store::db;
 use kodo_ui::command::Command;
 use kodo_ui::event::{EventHandler, map_event};
 use kodo_ui::message::Message;
-use kodo_ui::model::Model;
+use kodo_ui::model::{ChatMessage, ChatRole, Model};
 use kodo_ui::skills::{default_skill_dirs, load_skills};
 use kodo_ui::tui::{init_terminal, restore_terminal, view};
 use kodo_ui::update::update;
@@ -36,7 +36,7 @@ struct Cli {
     #[arg(long, short)]
     provider: Option<String>,
 
-    /// Enable debug mode (shows debug side panel with Ctrl+\)
+    /// Enable in-chat debug logging at startup
     #[arg(long)]
     debug: bool,
 }
@@ -109,10 +109,10 @@ async fn main() -> Result<()> {
         kodo_ui::slash::merge_commands(load_skills(&personal_skill_dir, &project_skill_dir));
 
     if cli.debug {
-        model.debug_panel_open = true;
-        model
-            .debug_logs
-            .push("Debug mode enabled. Toggle panel with F12".to_string());
+        model.messages.push(ChatMessage {
+            role: ChatRole::System,
+            content: "[debug] Debug logging enabled at startup.".to_string(),
+        });
     }
 
     // Channel for agent events -> TUI

@@ -10,27 +10,16 @@ use kodo_llm::models::available_models;
 pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
     match message {
         Message::KeyInput(ch) => {
-            if model.palette_open {
-                model.palette_query.push(ch);
-                model.palette_selected = 0;
-            } else {
-                model.input.insert(model.cursor_pos, ch);
-                model.cursor_pos += 1;
-                sync_slash_state(model);
-            }
+            model.input.insert(model.cursor_pos, ch);
+            model.cursor_pos += 1;
+            sync_slash_state(model);
             vec![Command::None]
         }
 
-        Message::Backspace => {
-            if model.palette_open {
-                handle_palette_backspace(model)
-            } else {
-                handle_input_backspace(model)
-            }
-        }
+        Message::Backspace => handle_input_backspace(model),
 
         Message::Delete => {
-            if !model.palette_open && model.cursor_pos < model.input.len() {
+            if model.cursor_pos < model.input.len() {
                 model.input.remove(model.cursor_pos);
                 sync_slash_state(model);
             }
@@ -38,37 +27,31 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
         }
 
         Message::CursorLeft => {
-            if !model.palette_open && model.cursor_pos > 0 {
+            if model.cursor_pos > 0 {
                 model.cursor_pos -= 1;
             }
             vec![Command::None]
         }
 
         Message::CursorRight => {
-            if !model.palette_open && model.cursor_pos < model.input.len() {
+            if model.cursor_pos < model.input.len() {
                 model.cursor_pos += 1;
             }
             vec![Command::None]
         }
 
         Message::CursorHome => {
-            if !model.palette_open {
-                model.cursor_pos = 0;
-            }
+            model.cursor_pos = 0;
             vec![Command::None]
         }
 
         Message::CursorEnd => {
-            if !model.palette_open {
-                model.cursor_pos = model.input.len();
-            }
+            model.cursor_pos = model.input.len();
             vec![Command::None]
         }
 
         Message::Submit => {
-            if model.palette_open {
-                handle_palette_select(model)
-            } else if model.slash_is_active() {
+            if model.slash_is_active() {
                 handle_slash_execute(model)
             } else {
                 handle_input_submit(model)
@@ -99,75 +82,18 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
                 "Plan".to_string()
             };
             model.mode = new_mode.clone();
-
-            if model.debug_mode {
-                model.debug_logs.push(format!("Mode toggled to {new_mode}"));
-            }
+            push_debug_message(model, format!("Mode toggled to {new_mode}"));
 
             vec![Command::None]
         }
-
-        Message::OpenPalette => {
-            model.palette_open = true;
-            model.palette_query.clear();
-            model.palette_selected = 0;
-            vec![Command::None]
-        }
-
-        Message::ClosePalette => {
-            model.palette_open = false;
-            model.palette_query.clear();
-            model.palette_selected = 0;
-            vec![Command::None]
-        }
-
-        Message::PaletteInput(ch) => {
-            model.palette_query.push(ch);
-            model.palette_selected = 0;
-            vec![Command::None]
-        }
-
-        Message::PaletteBackspace => handle_palette_backspace(model),
-
-        Message::PaletteUp => {
-            if model.palette_selected > 0 {
-                model.palette_selected -= 1;
-            }
-            vec![Command::None]
-        }
-
-        Message::PaletteDown => {
-            model.palette_selected += 1;
-            vec![Command::None]
-        }
-
-        Message::PaletteSelect => handle_palette_select(model),
 
         Message::SetTheme(choice) => {
             model.theme = match choice {
-                ThemeChoice::Dark => {
-                    model.debug_logs.push("Theme changed to Dark".to_string());
-                    Theme::dark()
-                }
-                ThemeChoice::Light => {
-                    model.debug_logs.push("Theme changed to Light".to_string());
-                    Theme::light()
-                }
+                ThemeChoice::Dark => Theme::dark(),
+                ThemeChoice::Light => Theme::light(),
             };
             model.update_syntax_theme();
-            vec![Command::None]
-        }
-
-        Message::ToggleDebugPanel => {
-            if model.debug_mode {
-                model.debug_panel_open = !model.debug_panel_open;
-                let status = if model.debug_panel_open {
-                    "opened"
-                } else {
-                    "closed"
-                };
-                model.debug_logs.push(format!("Debug panel {status}"));
-            }
+            push_debug_message(model, format!("Theme changed to {:?}", choice));
             vec![Command::None]
         }
 
@@ -192,47 +118,33 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
         }
 
         Message::AgentToolStart { name } => {
-            if model.debug_mode {
-                model.debug_logs.push(format!("Tool started: {name}"));
-            }
+            push_debug_message(model, format!("Tool started: {name}"));
             vec![Command::None]
         }
 
         Message::AgentToolDone { name, success } => {
-            if model.debug_mode {
-                let status = if success { "ok" } else { "failed" };
-                model.debug_logs.push(format!("Tool {status}: {name}"));
-            }
+            let status = if success { "ok" } else { "failed" };
+            push_debug_message(model, format!("Tool {status}: {name}"));
             vec![Command::None]
         }
 
         Message::AgentToolDenied { name, reason } => {
-            if model.debug_mode {
-                model
-                    .debug_logs
-                    .push(format!("Tool denied: {name} - {reason}"));
-            }
+            push_debug_message(model, format!("Tool denied: {name} - {reason}"));
             vec![Command::None]
         }
 
         Message::AgentToolCancelled { name } => {
-            if model.debug_mode {
-                model.debug_logs.push(format!("Tool cancelled: {name}"));
-            }
+            push_debug_message(model, format!("Tool cancelled: {name}"));
             vec![Command::None]
         }
 
         Message::AgentFormatted { message } => {
-            if model.debug_mode {
-                model.debug_logs.push(format!("Formatted: {message}"));
-            }
+            push_debug_message(model, format!("Formatted: {message}"));
             vec![Command::None]
         }
 
         Message::AgentDiagnostics { summary, count } => {
-            if model.debug_mode {
-                model.debug_logs.push(format!("LSP: {count} diagnostic(s)"));
-            }
+            push_debug_message(model, format!("LSP: {count} diagnostic(s)"));
             if count > 0 {
                 push_system_message(model, summary);
             }
@@ -240,9 +152,7 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
         }
 
         Message::AgentError(error) => {
-            if model.debug_mode {
-                model.debug_logs.push(format!("Error: {error}"));
-            }
+            push_debug_message(model, format!("Error: {error}"));
             model.messages.push(ChatMessage {
                 role: ChatRole::Assistant,
                 content: format!("Error: {error}"),
@@ -298,9 +208,7 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
         }
 
         Message::Resize(width, height) => {
-            if model.debug_mode {
-                model.debug_logs.push(format!("Resize: {width}x{height}"));
-            }
+            push_debug_message(model, format!("Resize: {width}x{height}"));
             vec![Command::None]
         }
 
@@ -319,9 +227,7 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
             if let Some(action) = model.keybinds.get_leader_action(key) {
                 let msg = match action {
                     crate::keybinds::KeyAction::Message(msg) => msg.clone(),
-                    crate::keybinds::KeyAction::OpenPalette => Message::OpenPalette,
                     crate::keybinds::KeyAction::ToggleMode => Message::ToggleMode,
-                    crate::keybinds::KeyAction::ToggleDebug => Message::ToggleDebugPanel,
                     crate::keybinds::KeyAction::ToggleTheme => {
                         let new_theme = if model.theme.is_dark() {
                             ThemeChoice::Light
@@ -352,14 +258,6 @@ fn handle_input_backspace(model: &mut Model) -> Vec<Command> {
         model.input.remove(model.cursor_pos);
     }
     sync_slash_state(model);
-    vec![Command::None]
-}
-
-fn handle_palette_backspace(model: &mut Model) -> Vec<Command> {
-    if !model.palette_query.is_empty() {
-        model.palette_query.pop();
-        model.palette_selected = 0;
-    }
     vec![Command::None]
 }
 
@@ -457,6 +355,25 @@ fn handle_slash_execute(model: &mut Model) -> Vec<Command> {
                 );
                 vec![Command::None]
             }
+            "debug" => {
+                let next_mode = match parsed.args.first().map(|arg| arg.to_ascii_lowercase()) {
+                    Some(arg) if arg == "on" => true,
+                    Some(arg) if arg == "off" => false,
+                    Some(arg) => {
+                        push_system_message(model, format!("Usage: /debug [on|off] (got `{arg}`)"));
+                        return vec![Command::None];
+                    }
+                    None => !model.debug_mode,
+                };
+                model.debug_mode = next_mode;
+                let status = if model.debug_mode {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                push_system_message(model, format!("Debug logging {status}."));
+                vec![Command::None]
+            }
             "model" => {
                 if let Some(model_id) = parsed.args.first() {
                     if model_is_known_for_provider(&model.provider, model_id) {
@@ -531,6 +448,12 @@ fn push_system_message(model: &mut Model, content: String) {
     model.scroll_offset = 0;
 }
 
+fn push_debug_message(model: &mut Model, content: String) {
+    if model.debug_mode {
+        push_system_message(model, format!("[debug] {content}"));
+    }
+}
+
 fn build_skill_injection(skill: &skills::SkillDef, raw_args: &str) -> String {
     let mut injection = skills::render_body(&skill.body, raw_args);
 
@@ -547,32 +470,6 @@ fn build_skill_injection(skill: &skills::SkillDef, raw_args: &str) -> String {
     // Per-directory read allowlisting does not exist yet, so base_dir is only
     // surfaced in the injection manifest for now.
     injection
-}
-
-fn handle_palette_select(model: &mut Model) -> Vec<Command> {
-    model.palette_open = false;
-
-    match model.palette_query.to_lowercase().as_str() {
-        "quit" | "exit" => {
-            model.should_quit = true;
-            vec![Command::Quit]
-        }
-        "clear" => {
-            model.messages.clear();
-            model.streaming_text.clear();
-            model.scroll_offset = 0;
-            vec![Command::None]
-        }
-        "dark" => {
-            model.theme = Theme::dark();
-            vec![Command::None]
-        }
-        "light" => {
-            model.theme = Theme::light();
-            vec![Command::None]
-        }
-        _ => vec![Command::None],
-    }
 }
 
 #[cfg(test)]
@@ -765,6 +662,49 @@ mod tests {
             [Command::LoginProvider { provider, name }]
             if provider == "openai" && name.as_deref() == Some("Work")
         ));
+    }
+
+    #[test]
+    fn test_slash_debug_toggles_logging() {
+        let mut model = Model::new(false);
+        model.input = "/debug".to_string();
+        model.cursor_pos = model.input.len();
+        model.slash_state = slash::state_for_input(&model.input, &model.commands);
+
+        let commands = update(&mut model, Message::SlashExecute);
+
+        assert!(commands.iter().all(|command| command.is_none()));
+        assert!(model.debug_mode);
+        assert!(
+            model
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Debug logging enabled")
+        );
+    }
+
+    #[test]
+    fn test_debug_messages_are_sent_to_chat_when_enabled() {
+        let mut model = Model::new(true);
+
+        update(
+            &mut model,
+            Message::AgentToolDone {
+                name: "shell".to_string(),
+                success: true,
+            },
+        );
+
+        assert!(
+            model
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .contains("[debug] Tool ok: shell")
+        );
     }
 
     #[test]

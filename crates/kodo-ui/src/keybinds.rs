@@ -50,12 +50,8 @@ impl From<KeyEvent> for KeyBind {
 pub enum KeyAction {
     /// Send a specific message
     Message(Message),
-    /// Open command palette
-    OpenPalette,
     /// Toggle between Plan and Build modes
     ToggleMode,
-    /// Toggle debug panel
-    ToggleDebug,
     /// Toggle between dark and light theme
     ToggleTheme,
     /// Quit application
@@ -95,11 +91,11 @@ impl KeyBindRegistry {
     fn load_defaults(&mut self) {
         // Global keybinds (work in any mode) - all follow Ctrl+key pattern
         self.bind(KeyBind::ctrl(KeyCode::Char('c')), KeyAction::Quit);
-        self.bind(KeyBind::ctrl(KeyCode::Char('k')), KeyAction::OpenPalette);
+        self.bind(KeyBind::ctrl(KeyCode::Char('k')), KeyAction::None);
         self.bind(KeyBind::ctrl(KeyCode::Char('q')), KeyAction::Quit);
         self.bind(KeyBind::ctrl(KeyCode::Char('m')), KeyAction::ToggleMode);
         self.bind(KeyBind::ctrl(KeyCode::Char('t')), KeyAction::ToggleTheme);
-        self.bind(KeyBind::key(KeyCode::F(12)), KeyAction::ToggleDebug);
+        self.bind(KeyBind::key(KeyCode::F(12)), KeyAction::None);
         self.bind(KeyBind::key(KeyCode::Tab), KeyAction::ToggleMode);
     }
 

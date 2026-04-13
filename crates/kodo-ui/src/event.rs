@@ -111,8 +111,7 @@ fn map_key_event(key: &KeyEvent, model: &Model) -> Option<Message> {
         return handle_leader_sequence(key, model);
     }
 
-    if !model.palette_open
-        && model.slash_is_active()
+    if model.slash_is_active()
         && let Some(message) = map_slash_input(key)
     {
         return Some(message);
@@ -127,14 +126,7 @@ fn map_key_event(key: &KeyEvent, model: &Model) -> Option<Message> {
     }
 
     if matches!(key.code, KeyCode::Esc) && key.modifiers == KeyModifiers::NONE {
-        if model.palette_open {
-            return Some(Message::ClosePalette);
-        }
         return None;
-    }
-
-    if model.palette_open {
-        return map_palette_input(key);
     }
 
     if !model.is_streaming {
@@ -155,15 +147,7 @@ fn handle_leader_sequence(key: &KeyEvent, model: &Model) -> Option<Message> {
 fn keybind_action_to_message(action: &KeyAction, model: &Model) -> Option<Message> {
     match action {
         KeyAction::Message(msg) => Some(msg.clone()),
-        KeyAction::OpenPalette => {
-            if model.palette_open {
-                Some(Message::ClosePalette)
-            } else {
-                Some(Message::OpenPalette)
-            }
-        }
         KeyAction::ToggleMode => Some(Message::ToggleMode),
-        KeyAction::ToggleDebug => Some(Message::ToggleDebugPanel),
         KeyAction::ToggleTheme => {
             let new_theme = if model.theme.is_dark() {
                 ThemeChoice::Light
@@ -174,17 +158,6 @@ fn keybind_action_to_message(action: &KeyAction, model: &Model) -> Option<Messag
         }
         KeyAction::Quit => Some(Message::Quit),
         KeyAction::None => None,
-    }
-}
-
-fn map_palette_input(key: &KeyEvent) -> Option<Message> {
-    match key.code {
-        KeyCode::Char(ch) => Some(Message::PaletteInput(ch)),
-        KeyCode::Backspace => Some(Message::PaletteBackspace),
-        KeyCode::Enter => Some(Message::PaletteSelect),
-        KeyCode::Up => Some(Message::PaletteUp),
-        KeyCode::Down => Some(Message::PaletteDown),
-        _ => None,
     }
 }
 
@@ -237,20 +210,6 @@ mod tests {
     }
 
     #[test]
-    fn test_palette_toggle() {
-        let mut model = test_model();
-        let key = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL);
-        let event = Event::Key(key);
-
-        let message = map_event(&event, &model);
-        assert!(matches!(message, Some(Message::OpenPalette)));
-
-        model.palette_open = true;
-        let message = map_event(&event, &model);
-        assert!(matches!(message, Some(Message::ClosePalette)));
-    }
-
-    #[test]
     fn test_input_while_streaming() {
         let mut model = test_model();
         model.is_streaming = true;
@@ -260,18 +219,6 @@ mod tests {
 
         let message = map_event(&event, &model);
         assert!(message.is_none());
-    }
-
-    #[test]
-    fn test_palette_input() {
-        let mut model = test_model();
-        model.palette_open = true;
-
-        let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
-        let event = Event::Key(key);
-
-        let message = map_event(&event, &model);
-        assert!(matches!(message, Some(Message::PaletteInput('q'))));
     }
 
     #[test]

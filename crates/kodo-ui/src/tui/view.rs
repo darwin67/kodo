@@ -25,17 +25,6 @@ static SYNTAX_HIGHLIGHTER: OnceLock<SyntaxHighlighter> = OnceLock::new();
 pub fn view(frame: &mut Frame, model: &Model) {
     let area = frame.area();
 
-    // Split screen for debug panel if needed
-    let (main_area, debug_area) = if model.debug_mode && model.debug_panel_open {
-        let h_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
-            .split(area);
-        (h_chunks[0], Some(h_chunks[1]))
-    } else {
-        (area, None)
-    };
-
     let slash_height = model
         .slash_state
         .as_ref()
@@ -50,21 +39,11 @@ pub fn view(frame: &mut Frame, model: &Model) {
             Constraint::Min(1),                   // Output/chat area
             Constraint::Length(3 + slash_height), // Input area
         ])
-        .split(main_area);
+        .split(area);
 
     render_status_bar(frame, model, chunks[0]);
     render_output(frame, model, chunks[1]);
     render_input(frame, model, chunks[2]);
-
-    // Debug side panel
-    if let Some(debug_area) = debug_area {
-        render_debug_panel(frame, model, debug_area);
-    }
-
-    // Command palette overlay (modal)
-    if model.palette_open {
-        render_palette(frame, model, area);
-    }
 }
 
 /// Render the status bar showing mode, provider, model, and token counts
@@ -72,7 +51,7 @@ fn render_status_bar(frame: &mut Frame, model: &Model, area: Rect) {
     let mode_indicator = format!(" {} ", model.mode.to_uppercase());
     let provider_model = format!(" {} / {} ", model.provider, model.model_name);
     let tokens = format!(" {}i/{}o ", model.input_tokens, model.output_tokens);
-    let palette_hint = " Ctrl+K ";
+    let slash_hint = " / commands ";
 
     let status =
         Line::from(vec![
@@ -95,10 +74,7 @@ fn render_status_bar(frame: &mut Frame, model: &Model, area: Rect) {
                 " ".repeat(area.width.saturating_sub(50) as usize),
                 model.theme.status_style(),
             ),
-            Span::styled(
-                palette_hint,
-                model.theme.status_style().fg(model.theme.muted),
-            ),
+            Span::styled(slash_hint, model.theme.status_style().fg(model.theme.muted)),
         ]);
 
     let bar = Paragraph::new(status).style(model.theme.status_style());
@@ -268,102 +244,4 @@ fn render_slash_completions(frame: &mut Frame, model: &Model, area: Rect) {
     );
 
     frame.render_widget(widget, area);
-}
-
-/// Render the debug panel showing debug logs
-fn render_debug_panel(frame: &mut Frame, model: &Model, area: Rect) {
-    let mut lines: Vec<Line> = model
-        .debug_logs
-        .iter()
-        .map(|log| Line::styled(log.as_str(), model.theme.muted_style()))
-        .collect();
-
-    if lines.is_empty() {
-        lines.push(Line::styled(
-            "No debug logs yet.",
-            model.theme.muted_style(),
-        ));
-    }
-
-    // Handle scrolling for debug panel
-    let total = lines.len() as u16;
-    let visible = area.height.saturating_sub(2); // Account for border
-    let max_scroll = total.saturating_sub(visible);
-    let scroll = max_scroll.saturating_sub(model.debug_scroll);
-
-    let panel = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(model.theme.muted_style())
-                .title(" Debug "),
-        )
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
-
-    frame.render_widget(panel, area);
-}
-
-/// Render the command palette modal overlay
-fn render_palette(frame: &mut Frame, model: &Model, area: Rect) {
-    // Center the palette on screen
-    let width = area.width.min(60);
-    let height = area.height.min(20);
-    let x = (area.width - width) / 2;
-    let y = (area.height - height) / 2;
-    let palette_area = Rect::new(x, y, width, height);
-
-    // Get available commands and filter by query
-    let commands = palette_commands();
-    let filtered: Vec<&(&str, &str)> = if model.palette_query.is_empty() {
-        commands.iter().collect()
-    } else {
-        let q = model.palette_query.to_lowercase();
-        commands
-            .iter()
-            .filter(|(name, _)| name.to_lowercase().contains(&q))
-            .collect()
-    };
-
-    // Render command list with selection highlighting
-    let mut lines = Vec::new();
-    let selected_index = model.palette_selected.min(filtered.len().saturating_sub(1));
-    for (i, (name, desc)) in filtered.iter().enumerate() {
-        let style = if i == selected_index {
-            model.theme.accent_style().add_modifier(Modifier::REVERSED)
-        } else {
-            model.theme.text_style()
-        };
-        lines.push(Line::styled(format!("  {name:<25} {desc}"), style));
-    }
-
-    // Show search query in title
-    let search_line = format!(" > {} ", model.palette_query);
-    let palette = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(model.theme.accent_style())
-            .title(search_line),
-    );
-
-    // Clear the area behind the palette (for proper modal appearance)
-    let clear = Paragraph::new("").style(model.theme.text_style());
-    frame.render_widget(clear, palette_area);
-    frame.render_widget(palette, palette_area);
-}
-
-/// Available commands for the command palette.
-/// In a full implementation, this would be dynamic based on available actions.
-pub fn palette_commands() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("quit", "Exit kodo"),
-        ("clear", "Clear conversation history"),
-        ("dark", "Switch to dark theme"),
-        ("light", "Switch to light theme"),
-        ("Switch Model", "Change the active model"),
-        ("Switch Provider", "Change the LLM provider"),
-        ("Undo Last Edit", "Revert last file change"),
-        ("Show Tools", "List registered tools"),
-        ("New Session", "Start a new session"),
-    ]
 }

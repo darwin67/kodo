@@ -36,29 +36,9 @@ pub enum Message {
     /// Toggle between Plan/Build mode (Tab key)
     ToggleMode,
 
-    // -- Command palette --
-    /// Open the command palette (Ctrl+K)
-    OpenPalette,
-    /// Close the command palette (Escape)
-    ClosePalette,
-    /// User typed in the palette search
-    PaletteInput(char),
-    /// Backspace in palette search
-    PaletteBackspace,
-    /// Move palette selection up
-    PaletteUp,
-    /// Move palette selection down
-    PaletteDown,
-    /// Select current palette item (Enter)
-    PaletteSelect,
-
     // -- Theme --
     /// Change the active theme
     SetTheme(ThemeChoice),
-
-    // -- Debug --
-    /// Toggle debug panel visibility (F12)
-    ToggleDebugPanel,
 
     // -- Keybinds --
     /// Start waiting for leader key sequence

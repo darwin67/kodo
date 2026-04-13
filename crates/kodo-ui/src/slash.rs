@@ -59,6 +59,7 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
         ("help", "", "Print all available commands"),
         ("clear", "", "Clear conversation history"),
         ("compact", "", "Summarise context and replace messages"),
+        ("debug", "[on|off]", "Toggle in-chat debug logging"),
         ("model", "[id]", "Show current model, or switch to id"),
         ("providers", "", "List all connected accounts"),
         ("login", "<provider> [name]", "Add a new account"),
@@ -181,7 +182,7 @@ mod tests {
 
     #[test]
     fn commands_contains_all_builtins() {
-        assert_eq!(builtin_commands().len(), 7);
+        assert_eq!(builtin_commands().len(), 8);
     }
 
     #[test]
