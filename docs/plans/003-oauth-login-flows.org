@@ -264,24 +264,23 @@ no env var fallback. OpenAI accounts get token refresh; others do not.
 - [X] Error messages direct the user to ~kodo --login <provider>~
 - [X] ~cargo build -p kodo-store~ succeeds
 
-** TODO Step 6: Add ~--login~ CLI argument
+** DONE Step 6: Wire ~\/login~ runtime command
 
-*What*: Allow users to trigger login from the CLI. OpenAI runs OAuth;
-Anthropic/Gemini prompt for an API key (saved to keychain).
+*What*: Allow users to trigger login from the existing slash command runtime
+path. OpenAI runs OAuth; Anthropic/Gemini prompt for an API key (saved to
+keychain).
 
 *File*: ~src/main.rs~
 
-Add ~login: Option<String>~ arg to ~Cli~.
-
-In ~main()~: match on provider string → run OAuth flow or prompt for key →
-call ~save_token()~ → print confirmation → early return.
+In ~handle_login_command() / login_provider()~: match on provider string → run
+OAuth flow or prompt for key → call ~save_token()~.
 
 *Checklist*:
-- [ ] ~--login openai~ runs full OAuth flow and saves tokens
-- [ ] ~--login anthropic~ prompts for API key and saves to keychain
-- [ ] ~--login gemini~ prompts for API key and saves to keychain
-- [ ] Unknown providers print an error
-- [ ] ~cargo build~ succeeds
+- [X] ~\/login openai~ runs full OAuth flow and saves tokens
+- [X] ~\/login anthropic~ prompts for API key and saves to keychain
+- [X] ~\/login gemini~ prompts for API key and saves to keychain
+- [X] Unknown providers print an error
+- [X] ~cargo build~ succeeds
 
 ** TODO Step 7: Update provider implementations
 
@@ -297,15 +296,15 @@ The ~account_id~ comes from the active session/thread configuration.
 - [ ] Each provider uses the correct header format
 - [ ] ~cargo build~ succeeds
 
-** TODO Step 8: Export ~oauth~ module
+** DONE Step 8: Export ~oauth~ module
 
 *File*: ~crates/kodo-store/src/lib.rs~
 
 Add ~pub mod oauth;~.
 
 *Checklist*:
-- [ ] ~pub mod oauth;~ exists in ~kodo-store/src/lib.rs~
-- [ ] ~cargo build~ succeeds
+- [X] ~pub mod oauth;~ exists in ~kodo-store/src/lib.rs~
+- [X] ~cargo build~ succeeds
 
 ** TODO Step 9: Final verification (OAuth + keychain)
 
@@ -314,11 +313,11 @@ Add ~pub mod oauth;~.
 - [ ] ~cargo test --workspace~ all pass
 - [ ] ~cargo clippy --workspace~ no warnings
 - [ ] PKCE verifier/challenge generation works
-- [ ] OpenAI: ~--login openai~ opens browser, completes OAuth, saves API key
-- [ ] Anthropic: ~--login anthropic~ prompts for key, saves to keychain
-- [ ] Gemini: ~--login gemini~ prompts for key, saves to keychain
+- [ ] OpenAI: ~\/login openai~ opens browser, completes OAuth, saves API key
+- [ ] Anthropic: ~\/login anthropic~ prompts for key, saves to keychain
+- [ ] Gemini: ~\/login gemini~ prompts for key, saves to keychain
 - [ ] ~resolve_auth()~ resolves from keychain only (no env var fallback)
-- [ ] ~--login~ CLI arg accepted
+- [ ] ~\/login~ runtime command triggers auth flows
 
 ** TODO Step 10: DB migration for multi-account support
 
@@ -341,7 +340,7 @@ Change ~MIGRATIONS_SQL~ from a single ~&str~ to a ~&[&str]~ slice including
 both migration files; apply each in order.
 
 *Note on keychain migration*: Existing keychain entries used ~provider~ as the
-service key. The migration can't move them automatically — users re-run ~--login~
+service key. The migration can't move them automatically — users re-run ~\/login~
 for existing accounts, or a one-time startup migration reads old keys and
 re-saves under the new account ID.
 
@@ -388,24 +387,22 @@ Remove old ~save_token~ / ~get_token~ / ~list_providers~.
 - [ ] All existing tests updated for new API
 - [ ] ~cargo test -p kodo-store~ passes
 
-** TODO Step 12: Update ~--login~ for multi-account
+** TODO Step 12: Update ~\/login~ for multi-account
 
-*What*: ~--login <provider>~ always creates a new account (not upsert).
-~--name <label>~ stores a display name on the new account.
+*What*: ~\/login <provider> [name]~ always creates a new account (not upsert).
+The optional name stores a display label on the new account.
 
 *File*: ~src/main.rs~
 
-Add ~name: Option<String>~ arg to ~Cli~ alongside ~login~.
-
 Login handler: acquire ~(token, refresh_token, expires_at)~ via OAuth or key
-prompt → call ~create_account()~ with ~cli.name~ → print ~"Account '{name}'
+prompt → call ~create_account()~ with slash-command name → print ~"Account '{name}'
 created (id: {id})"~ → early return.
 
 *Checklist*:
-- [ ] ~--login openai~ creates a new account and prints its ID
-- [ ] ~--login anthropic~ / ~--login gemini~ prompts for API key, creates account
-- [ ] ~--name <label>~ stores custom name on the new account
-- [ ] Multiple ~--login openai~ calls create separate accounts (not upsert)
+- [ ] ~\/login openai <name>~ creates a new account and prints its ID
+- [ ] ~\/login anthropic~ / ~\/login gemini~ prompts for API key, creates account
+- [ ] Optional slash-command name stores custom account label
+- [ ] Multiple ~\/login openai~ calls create separate accounts (not upsert)
 - [ ] ~cargo build~ succeeds
 
 ** TODO Step 13: Final verification (multi-account)
@@ -414,8 +411,8 @@ created (id: {id})"~ → early return.
 - [ ] ~cargo build~ clean
 - [ ] ~cargo test --workspace~ all pass
 - [ ] ~cargo clippy --workspace~ no warnings
-- [ ] ~--login openai --name "Work"~ creates an account labeled "Work"
-- [ ] ~--login anthropic --name "Personal"~ creates a second Anthropic account
+- [ ] ~\/login openai Work~ creates an account labeled "Work"
+- [ ] ~\/login anthropic Personal~ creates a second Anthropic account
 - [ ] Two accounts of same provider can coexist in DB
 - [ ] ~resolve_auth(account_id)~ returns the correct token for each account
 

@@ -15,6 +15,7 @@ use kodo_llm::provider::Provider;
 use kodo_store::auth;
 use kodo_store::crypto::KeychainStore;
 use kodo_store::db;
+use kodo_store::oauth::ProviderOAuthConfig;
 use kodo_ui::command::Command;
 use kodo_ui::event::{EventHandler, map_event};
 use kodo_ui::message::Message;
@@ -330,25 +331,53 @@ async fn handle_login_command(
 }
 
 async fn login_provider(provider: &str) -> Result<String> {
-    let prompt = match provider {
-        "anthropic" => "Anthropic API key: ",
-        "openai" => "OpenAI API key or access token: ",
-        "gemini" => "Gemini API key: ",
+    let pool = db::open(&db::default_db_path()).await?;
+    let store = KeychainStore;
+
+    match provider {
+        "openai" => {
+            eprintln!(
+                "Logging in to `openai`. Your browser will open for OAuth and credentials will be stored in the OS keychain."
+            );
+            let tokens =
+                kodo_store::oauth::run_openai_oauth_flow(&ProviderOAuthConfig::openai_default())
+                    .await?;
+            let expires_at = tokens.expires_in.map(format_oauth_expiry);
+            auth::save_token(
+                &pool,
+                &store,
+                provider,
+                &tokens.access_token,
+                tokens.refresh_token.as_deref(),
+                expires_at.as_deref(),
+            )
+            .await?;
+        }
+        "anthropic" | "gemini" => {
+            let prompt = match provider {
+                "anthropic" => "Anthropic API key: ",
+                "gemini" => "Gemini API key: ",
+                _ => unreachable!(),
+            };
+
+            eprintln!("Logging in to `{provider}`. Credentials are stored in the OS keychain.");
+            let secret = prompt_password(prompt)?;
+            let secret = secret.trim().to_string();
+            if secret.is_empty() {
+                bail!("No credential entered.");
+            }
+
+            auth::save_token(&pool, &store, provider, &secret, None, None).await?;
+        }
         "ollama" => bail!("`ollama` does not require login."),
         other => bail!(
             "Unknown provider `{other}`. Available providers: anthropic, openai, gemini, ollama."
         ),
-    };
-
-    eprintln!("Logging in to `{provider}`. Credentials are stored in the OS keychain.");
-    let secret = prompt_password(prompt)?;
-    let secret = secret.trim().to_string();
-    if secret.is_empty() {
-        bail!("No credential entered.");
     }
 
-    let pool = db::open(&db::default_db_path()).await?;
-    let store = KeychainStore;
-    auth::save_token(&pool, &store, provider, &secret, None, None).await?;
     Ok(provider.to_string())
+}
+
+fn format_oauth_expiry(expires_in: i64) -> String {
+    (chrono::Utc::now() + chrono::Duration::seconds(expires_in)).to_rfc3339()
 }

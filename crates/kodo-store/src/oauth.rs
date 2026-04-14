@@ -30,6 +30,10 @@ const OPENAI_ISSUER: &str = "https://auth.openai.com";
 const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_SCOPES: &str = "openid profile email offline_access";
 
+type CallbackResult = std::result::Result<(String, String), String>;
+type CallbackSender = oneshot::Sender<CallbackResult>;
+type SharedCallbackSender = Arc<Mutex<Option<CallbackSender>>>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderOAuthConfig {
     OpenAI { issuer: String, client_id: String },
@@ -158,7 +162,7 @@ fn build_authorize_url(
 
 async fn wait_for_callback(listener: TcpListener) -> Result<(String, String)> {
     let (tx, rx) = oneshot::channel();
-    let tx = Arc::new(Mutex::new(Some(tx)));
+    let tx: SharedCallbackSender = Arc::new(Mutex::new(Some(tx)));
 
     let server = tokio::spawn({
         let tx = Arc::clone(&tx);
@@ -197,7 +201,7 @@ async fn wait_for_callback(listener: TcpListener) -> Result<(String, String)> {
 
 async fn handle_callback_request(
     request: Request<Incoming>,
-    callback_tx: Arc<Mutex<Option<oneshot::Sender<std::result::Result<(String, String), String>>>>>,
+    callback_tx: SharedCallbackSender,
 ) -> std::result::Result<Response<Full<Bytes>>, Infallible> {
     let response = match parse_callback_uri(request.uri()) {
         Ok(callback) => {
