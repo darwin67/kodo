@@ -1313,10 +1313,13 @@ name = "kodo-store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "keyring",
+ "rand",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "thiserror",
