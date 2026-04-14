@@ -144,7 +144,7 @@ For SSH/headless environments where a browser can't be opened locally:
 
 * Step-by-step Plan
 
-** TODO Step 1: Add dependencies to ~kodo-store/Cargo.toml~
+** DONE Step 1: Add dependencies to ~kodo-store/Cargo.toml~
 
 *What*: Add crates needed for the OAuth flow.
 
@@ -155,10 +155,10 @@ Add to ~[dependencies]~: ~hyper~ (server + http1 features), ~hyper-util~
 (serde feature).
 
 *Checklist*:
-- [ ] All dependencies added to ~[dependencies]~ in ~kodo-store/Cargo.toml~
-- [ ] ~cargo build -p kodo-store~ succeeds
+- [X] All dependencies added to ~[dependencies]~ in ~kodo-store/Cargo.toml~
+- [X] ~cargo build -p kodo-store~ succeeds
 
-** TODO Step 2: Create ~oauth.rs~ — PKCE utilities
+** DONE Step 2: Create ~oauth.rs~ — PKCE utilities
 
 *What*: Implement PKCE code_verifier, code_challenge, and state generation.
 Matches the Codex approach: 64-byte random verifier, S256 challenge.
@@ -173,14 +173,14 @@ Matches the Codex approach: 64-byte random verifier, S256 challenge.
 from verifier; state is non-empty.
 
 *Checklist*:
-- [ ] ~oauth.rs~ file created at ~crates/kodo-store/src/oauth.rs~
-- [ ] ~generate_code_verifier()~ returns 64 random bytes, URL-safe base64
-- [ ] ~code_challenge()~ returns ~base64url(sha256(verifier))~
-- [ ] ~generate_state()~ returns 32 random bytes, URL-safe base64
-- [ ] Tests pass
-- [ ] ~cargo test -p kodo-store~ passes
+- [X] ~oauth.rs~ file created at ~crates/kodo-store/src/oauth.rs~
+- [X] ~generate_code_verifier()~ returns 64 random bytes, URL-safe base64
+- [X] ~code_challenge()~ returns ~base64url(sha256(verifier))~
+- [X] ~generate_state()~ returns 32 random bytes, URL-safe base64
+- [X] Tests pass
+- [X] ~cargo test -p kodo-store~ passes
 
-** TODO Step 3: Add provider OAuth config and callback server
+** DONE Step 3: Add provider OAuth config and callback server
 
 *What*: Add ~ProviderOAuthConfig~ enum, ~OAuthTokens~ struct, and a local HTTP
 callback server. Only OpenAI has a full OAuth config.
@@ -206,13 +206,13 @@ callback server. Only OpenAI has a full OAuth config.
 - ~exchange_for_api_key~: RFC 8693 token exchange POST; return ~access_token~.
 
 *Checklist*:
-- [ ] ~ProviderOAuthConfig~ enum exists with ~OpenAI~ variant
-- [ ] ~openai_default()~ returns Codex-compatible config
-- [ ] ~run_openai_oauth_flow()~ starts local server, opens browser, waits for callback,
+- [X] ~ProviderOAuthConfig~ enum exists with ~OpenAI~ variant
+- [X] ~openai_default()~ returns Codex-compatible config
+- [X] ~run_openai_oauth_flow()~ starts local server, opens browser, waits for callback,
       exchanges code, then exchanges id_token for API key
-- [ ] CSRF protection via ~state~ parameter
-- [ ] Timeout of 120 seconds on callback wait
-- [ ] ~cargo build -p kodo-store~ succeeds
+- [X] CSRF protection via ~state~ parameter
+- [X] Timeout of 120 seconds on callback wait
+- [X] ~cargo build -p kodo-store~ succeeds
 
 ** TODO Step 4: Add ~refresh_if_needed()~ to ~auth.rs~
 
