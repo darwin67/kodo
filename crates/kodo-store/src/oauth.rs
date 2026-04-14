@@ -298,6 +298,32 @@ pub async fn exchange_for_api_key(config: &ProviderOAuthConfig, id_token: &str) 
     exchange_for_api_key_with_client(&Client::new(), config, id_token).await
 }
 
+pub async fn refresh_openai_tokens(
+    config: &ProviderOAuthConfig,
+    refresh_token: &str,
+) -> Result<OAuthTokens> {
+    refresh_openai_tokens_with_client(&Client::new(), config, refresh_token).await
+}
+
+pub(crate) async fn refresh_openai_tokens_with_client(
+    client: &Client,
+    config: &ProviderOAuthConfig,
+    refresh_token: &str,
+) -> Result<OAuthTokens> {
+    let response = client
+        .post(config.token_url()?)
+        .json(&serde_json::json!({
+            "client_id": config.client_id(),
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }))
+        .send()
+        .await
+        .context("failed to refresh OpenAI OAuth token")?;
+
+    deserialize_oauth_response(response, "refresh OAuth token").await
+}
+
 async fn exchange_for_api_key_with_client(
     client: &Client,
     config: &ProviderOAuthConfig,

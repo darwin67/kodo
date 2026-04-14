@@ -214,7 +214,7 @@ callback server. Only OpenAI has a full OAuth config.
 - [X] Timeout of 120 seconds on callback wait
 - [X] ~cargo build -p kodo-store~ succeeds
 
-** TODO Step 4: Add ~refresh_if_needed()~ to ~auth.rs~
+** DONE Step 4: Add ~refresh_if_needed()~ to ~auth.rs~
 
 *What*: Check token expiry and refresh if needed. Only applies to OAuth tokens
 (OpenAI); API keys (Anthropic, Gemini) never expire.
@@ -233,17 +233,17 @@ callback server. Only OpenAI has a full OAuth config.
 7. Compute new ~expires_at~ from ~expires_in~; call ~update_token()~; return new token.
 
 *Checklist*:
-- [ ] ~refresh_if_needed()~ function exists in ~auth.rs~
-- [ ] Returns existing token if not expired
-- [ ] Returns existing token if no expiry is set (API keys)
-- [ ] Refreshes token if expired/near-expiry and refresh_token exists
-- [ ] Uses JSON body for OpenAI refresh (matching Codex CLI)
-- [ ] After OpenAI refresh, re-exchanges id_token for API key
-- [ ] Returns ~None~ if expired with no refresh_token
-- [ ] Updated token is saved to keychain + DB
-- [ ] ~cargo build -p kodo-store~ succeeds
+- [X] ~refresh_if_needed()~ function exists in ~auth.rs~
+- [X] Returns existing token if not expired
+- [X] Returns existing token if no expiry is set (API keys)
+- [X] Refreshes token if expired/near-expiry and refresh_token exists
+- [X] Uses JSON body for OpenAI refresh (matching Codex CLI)
+- [X] After OpenAI refresh, re-exchanges id_token for API key
+- [X] Returns ~None~ if expired with no refresh_token
+- [X] Updated token is saved to keychain + DB
+- [X] ~cargo build -p kodo-store~ succeeds
 
-** TODO Step 5: Add ~resolve_auth()~ function
+** DONE Step 5: Add ~resolve_auth()~ function
 
 *What*: Unified auth resolution keyed on ~account_id~. Checks keychain only;
 no env var fallback. OpenAI accounts get token refresh; others do not.
@@ -256,13 +256,13 @@ no env var fallback. OpenAI accounts get token refresh; others do not.
 2. If nothing found: bail with ~"No credentials for {kind}. Run: kodo --login {kind}"~.
 
 *Checklist*:
-- [ ] ~resolve_auth()~ handles OpenAI, Anthropic, Gemini
-- [ ] OpenAI: keychain w/ refresh -> error w/ login instructions
-- [ ] Anthropic: keychain -> error w/ login instructions
-- [ ] Gemini: keychain -> error w/ login instructions
-- [ ] No environment variable checks anywhere in the chain
-- [ ] Error messages direct the user to ~kodo --login <provider>~
-- [ ] ~cargo build -p kodo-store~ succeeds
+- [X] ~resolve_auth()~ handles OpenAI, Anthropic, Gemini
+- [X] OpenAI: keychain w/ refresh -> error w/ login instructions
+- [X] Anthropic: keychain -> error w/ login instructions
+- [X] Gemini: keychain -> error w/ login instructions
+- [X] No environment variable checks anywhere in the chain
+- [X] Error messages direct the user to ~kodo --login <provider>~
+- [X] ~cargo build -p kodo-store~ succeeds
 
 ** TODO Step 6: Add ~--login~ CLI argument
 
