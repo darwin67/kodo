@@ -211,11 +211,27 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
             vec![Command::None]
         }
 
+        Message::ProviderChanged { provider, model: model_id } => {
+            model.provider = provider.clone();
+            model.model_name = model_id.clone();
+            push_system_message(
+                model,
+                format!("Switched provider to `{provider}` with model `{model_id}`."),
+            );
+            vec![Command::None]
+        }
+
         Message::LoginComplete { account_id, name } => {
             let mut message = format!("Logged in `{account_id}`.");
             if let Some(name) = name {
                 message.push_str(&format!(
                     " Account labels are not persisted yet, so `{name}` is only acknowledged for now."
+                ));
+            }
+            if account_id != model.provider {
+                message.push_str(&format!(
+                    " Active provider is still `{}`. Run `/provider {account_id}` and then `/model` to verify the login.",
+                    model.provider
                 ));
             }
             push_system_message(model, message);
@@ -398,6 +414,20 @@ fn handle_slash_execute(model: &mut Model) -> Vec<Command> {
                 };
                 push_system_message(model, format!("Debug logging {status}."));
                 vec![Command::None]
+            }
+            "provider" => {
+                if let Some(provider) = parsed.args.first() {
+                    vec![Command::SetProvider(provider.clone())]
+                } else {
+                    push_system_message(
+                        model,
+                        format!(
+                            "Current provider: `{}`. Use `/provider <name>` to switch.",
+                            model.provider
+                        ),
+                    );
+                    vec![Command::None]
+                }
             }
             "model" => {
                 if let Some(model_id) = parsed.args.first() {
@@ -670,6 +700,32 @@ mod tests {
     }
 
     #[test]
+    fn test_provider_changed_updates_provider_and_model() {
+        let mut model = Model::new(false);
+        model.provider = "anthropic".to_string();
+        model.model_name = "claude-sonnet-4-20250514".to_string();
+
+        update(
+            &mut model,
+            Message::ProviderChanged {
+                provider: "openai".to_string(),
+                model: "gpt-5".to_string(),
+            },
+        );
+
+        assert_eq!(model.provider, "openai");
+        assert_eq!(model.model_name, "gpt-5");
+        assert!(
+            model
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Switched provider to `openai` with model `gpt-5`.")
+        );
+    }
+
+    #[test]
     fn test_slash_providers_dispatches_runtime_command() {
         let mut model = Model::new(false);
         model.input = "/providers".to_string();
@@ -679,6 +735,42 @@ mod tests {
         let commands = update(&mut model, Message::SlashExecute);
 
         assert!(matches!(commands.as_slice(), [Command::ListProviders]));
+    }
+
+    #[test]
+    fn test_slash_provider_with_arg_dispatches_runtime_command() {
+        let mut model = Model::new(false);
+        model.input = "/provider openai".to_string();
+        model.cursor_pos = model.input.len();
+        model.slash_state = slash::state_for_input(&model.input, &model.commands);
+
+        let commands = update(&mut model, Message::SlashExecute);
+
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::SetProvider(provider)] if provider == "openai"
+        ));
+    }
+
+    #[test]
+    fn test_slash_provider_without_arg_shows_current_provider() {
+        let mut model = Model::new(false);
+        model.provider = "openai".to_string();
+        model.input = "/provider".to_string();
+        model.cursor_pos = model.input.len();
+        model.slash_state = slash::state_for_input(&model.input, &model.commands);
+
+        let commands = update(&mut model, Message::SlashExecute);
+
+        assert!(commands.iter().all(|command| command.is_none()));
+        assert!(
+            model
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Current provider: `openai`.")
+        );
     }
 
     #[test]

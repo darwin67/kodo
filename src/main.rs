@@ -68,6 +68,7 @@ fn default_model(provider_name: &str) -> &str {
 enum AgentRequest {
     ProcessMessage(String),
     ClearConversation,
+    SetProvider(String),
     SetModel(String),
     ListModels,
     ListProviders,
@@ -137,6 +138,20 @@ async fn main() -> Result<()> {
                 AgentRequest::ClearConversation => {
                     agent.clear_conversation();
                 }
+                AgentRequest::SetProvider(provider_name) => match create_provider(&provider_name) {
+                    Ok(provider) => {
+                        let model_name = default_model(&provider_name).to_string();
+                        agent.set_provider(provider);
+                        agent.set_model(model_name.clone());
+                        let _ = agent_event_tx.send(AgentEvent::ProviderChanged {
+                            provider: provider_name,
+                            model: model_name,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = agent_event_tx.send(AgentEvent::Error(format!("{error:#}")));
+                    }
+                },
                 AgentRequest::SetModel(model) => {
                     match agent.list_models().await {
                         Ok(models) => {
@@ -273,6 +288,9 @@ async fn execute_command(
         Command::ClearConversation => {
             let _ = req_tx.send(AgentRequest::ClearConversation);
         }
+        Command::SetProvider(provider) => {
+            let _ = req_tx.send(AgentRequest::SetProvider(provider));
+        }
         Command::SetModel(model) => {
             let _ = req_tx.send(AgentRequest::SetModel(model));
         }
@@ -343,6 +361,9 @@ fn map_agent_event(event: AgentEvent) -> Message {
         },
         AgentEvent::ProvidersListed(providers) => Message::ProvidersListed(providers),
         AgentEvent::ModelChanged(model_id) => Message::ModelChanged(model_id),
+        AgentEvent::ProviderChanged { provider, model } => {
+            Message::ProviderChanged { provider, model }
+        }
         AgentEvent::LoginComplete { account_id, name } => {
             Message::LoginComplete { account_id, name }
         }

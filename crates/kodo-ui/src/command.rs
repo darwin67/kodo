@@ -25,6 +25,9 @@ pub enum Command {
     /// Query the runtime for models available to the current provider/auth.
     ListModels,
 
+    /// Switch the active provider in the runtime.
+    SetProvider(String),
+
     /// List configured providers from the auth store.
     ListProviders,
 

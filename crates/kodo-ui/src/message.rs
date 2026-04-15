@@ -80,6 +80,11 @@ pub enum Message {
     ProvidersListed(Vec<String>),
     /// Runtime switched to a new model
     ModelChanged(String),
+    /// Runtime switched to a new provider and default model
+    ProviderChanged {
+        provider: String,
+        model: String,
+    },
     /// Runtime completed a login request
     LoginComplete {
         account_id: String,
