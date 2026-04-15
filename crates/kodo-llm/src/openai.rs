@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use async_trait::async_trait;
@@ -17,6 +18,7 @@ use kodo_store::crypto::KeychainStore;
 use kodo_store::db;
 
 const DEFAULT_API_BASE: &str = "https://api.openai.com/v1";
+const MODELS_LIST_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ---------------------------------------------------------------------------
 // OpenAI API request/response types (private)
@@ -686,6 +688,7 @@ impl Provider for OpenAiProvider {
         let auth = self.resolve_auth().await?;
         let response = self
             .apply_auth_headers(self.client.get(format!("{}/models", self.api_base)), &auth)
+            .timeout(MODELS_LIST_TIMEOUT)
             .send()
             .await
             .context("failed to list OpenAI models")?;

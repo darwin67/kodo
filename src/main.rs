@@ -9,9 +9,11 @@ use tokio::sync::mpsc;
 use kodo_core::agent::{Agent, AgentEvent};
 use kodo_llm::anthropic::AnthropicProvider;
 use kodo_llm::gemini::GeminiProvider;
+use kodo_llm::models::available_models;
 use kodo_llm::ollama::OllamaProvider;
 use kodo_llm::openai::OpenAiProvider;
 use kodo_llm::provider::Provider;
+use kodo_llm::types::ModelInfo;
 use kodo_store::auth;
 use kodo_store::crypto::KeychainStore;
 use kodo_store::db;
@@ -60,6 +62,28 @@ fn default_model(provider_name: &str) -> &str {
         "ollama" => "llama3.1",
         _ => "claude-sonnet-4-20250514",
     }
+}
+
+fn fallback_models(provider_name: &str) -> Vec<ModelInfo> {
+    available_models(provider_name)
+        .iter()
+        .map(|model| ModelInfo {
+            id: model.id.to_string(),
+            name: model.display_name.to_string(),
+            context_window: model.context_k * 1024,
+        })
+        .collect()
+}
+
+fn should_fallback_model_listing(provider_name: &str, error: &anyhow::Error) -> bool {
+    if provider_name != "openai" {
+        return false;
+    }
+
+    let message = format!("{error:#}").to_ascii_lowercase();
+    message.contains("timed out")
+        || message.contains("deadline has elapsed")
+        || message.contains("operation timed out")
 }
 
 /// Messages sent from the TUI event loop to the agent task.
@@ -153,32 +177,57 @@ async fn main() -> Result<()> {
                     }
                 },
                 AgentRequest::SetModel(model) => {
+                    let provider_name = agent.provider_name().to_string();
+                    let models = match agent.list_models().await {
+                        Ok(models) => models,
+                        Err(error) if should_fallback_model_listing(&provider_name, &error) => {
+                            let _ = agent_event_tx.send(AgentEvent::Notice(
+                                "OpenAI model lookup timed out after 15 seconds. Using the built-in coding model list; token verification will happen when you send a prompt."
+                                    .to_string(),
+                            ));
+                            fallback_models(&provider_name)
+                        }
+                        Err(error) => {
+                            let _ = agent_event_tx.send(AgentEvent::Error(format!("{error:#}")));
+                            continue;
+                        }
+                    };
+
+                    if models.iter().any(|candidate| candidate.id == model) {
+                        agent.set_model(model.clone());
+                        let _ = agent_event_tx.send(AgentEvent::ModelChanged(model));
+                    } else {
+                        let _ = agent_event_tx.send(AgentEvent::Error(format!(
+                            "Model `{model}` is not available for provider `{}` with the current credentials.",
+                            agent.provider_name()
+                        )));
+                    }
+                }
+                AgentRequest::ListModels => {
+                    let provider_name = agent.provider_name().to_string();
                     match agent.list_models().await {
                         Ok(models) => {
-                            if models.iter().any(|candidate| candidate.id == model) {
-                                agent.set_model(model.clone());
-                                let _ = agent_event_tx.send(AgentEvent::ModelChanged(model));
-                            } else {
-                                let _ = agent_event_tx.send(AgentEvent::Error(format!(
-                                    "Model `{model}` is not available for provider `{}` with the current credentials.",
-                                    agent.provider_name()
-                                )));
-                            }
+                            let _ = agent_event_tx.send(AgentEvent::ModelsListed {
+                                current_model: agent.model().to_string(),
+                                models: models.into_iter().map(|model| model.id).collect(),
+                            });
+                        }
+                        Err(error) if should_fallback_model_listing(&provider_name, &error) => {
+                            let _ = agent_event_tx.send(AgentEvent::Notice(
+                                "OpenAI model lookup timed out after 15 seconds. Showing the built-in coding model list instead; token verification will happen when you send a prompt."
+                                    .to_string(),
+                            ));
+                            let _ = agent_event_tx.send(AgentEvent::ModelsListed {
+                                current_model: agent.model().to_string(),
+                                models: fallback_models(&provider_name)
+                                    .into_iter()
+                                    .map(|model| model.id)
+                                    .collect(),
+                            });
                         }
                         Err(error) => {
                             let _ = agent_event_tx.send(AgentEvent::Error(format!("{error:#}")));
                         }
-                    }
-                }
-                AgentRequest::ListModels => match agent.list_models().await {
-                    Ok(models) => {
-                        let _ = agent_event_tx.send(AgentEvent::ModelsListed {
-                            current_model: agent.model().to_string(),
-                            models: models.into_iter().map(|model| model.id).collect(),
-                        });
-                    }
-                    Err(error) => {
-                        let _ = agent_event_tx.send(AgentEvent::Error(format!("{error:#}")));
                     }
                 }
                 AgentRequest::ListProviders => match load_configured_providers().await {
