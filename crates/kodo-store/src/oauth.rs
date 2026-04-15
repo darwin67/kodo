@@ -28,7 +28,11 @@ const STATE_BYTES: usize = 32;
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(120);
 const OPENAI_ISSUER: &str = "https://auth.openai.com";
 const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
-const OPENAI_SCOPES: &str = "openid profile email offline_access";
+const OPENAI_SCOPES: &str =
+    "openid profile email offline_access api.connectors.read api.connectors.invoke";
+const OPENAI_CALLBACK_ADDR: &str = "127.0.0.1:1455";
+const OPENAI_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+const OPENAI_ORIGINATOR: &str = "codex_cli_rs";
 
 type CallbackResult = std::result::Result<(String, String), String>;
 type CallbackSender = oneshot::Sender<CallbackResult>;
@@ -109,23 +113,35 @@ pub fn generate_state() -> String {
 }
 
 pub async fn run_openai_oauth_flow(config: &ProviderOAuthConfig) -> Result<OAuthTokens> {
+    run_openai_oauth_flow_with_notifier(config, |_| {}).await
+}
+
+pub async fn run_openai_oauth_flow_with_notifier<F>(
+    config: &ProviderOAuthConfig,
+    mut notify: F,
+) -> Result<OAuthTokens>
+where
+    F: FnMut(String),
+{
     let code_verifier = generate_code_verifier();
     let challenge = code_challenge(&code_verifier);
     let state = generate_state();
-    let listener = TcpListener::bind(("127.0.0.1", 0))
+    let listener = TcpListener::bind(OPENAI_CALLBACK_ADDR)
         .await
-        .context("failed to bind local OAuth callback listener")?;
-    let redirect_uri = format!(
-        "http://{}/auth/callback",
-        listener
-            .local_addr()
-            .context("failed to read callback listener address")?
-    );
-    let authorize_url = build_authorize_url(config, &redirect_uri, &challenge, &state)?;
+        .with_context(|| {
+            format!("failed to bind local OAuth callback listener on {OPENAI_CALLBACK_ADDR}")
+        })?;
+    let authorize_url = build_authorize_url(config, OPENAI_REDIRECT_URI, &challenge, &state)?;
+
+    notify(format!(
+        "Finish OpenAI login in your browser. If it does not open automatically, use this URL:\n{authorize_url}"
+    ));
 
     if let Err(error) = open::that(authorize_url.as_str()) {
         warn!(%error, url = %authorize_url, "failed to open browser for OAuth login");
-        eprintln!("Open this URL to continue login:\n{authorize_url}");
+        notify(format!(
+            "Failed to open your browser automatically. Open this URL to continue login:\n{authorize_url}"
+        ));
     }
 
     let (code, returned_state) = wait_for_callback(listener).await?;
@@ -133,12 +149,18 @@ pub async fn run_openai_oauth_flow(config: &ProviderOAuthConfig) -> Result<OAuth
         bail!("OAuth state mismatch; login response may be forged");
     }
 
-    let mut tokens = exchange_code_openai(config, &code, &redirect_uri, &code_verifier).await?;
+    notify("Browser login completed. Exchanging OAuth tokens...".to_string());
+
+    let mut tokens =
+        exchange_code_openai(config, &code, OPENAI_REDIRECT_URI, &code_verifier).await?;
     let id_token = tokens
         .id_token
         .as_deref()
         .context("OpenAI OAuth response did not include an id_token")?;
-    tokens.access_token = exchange_for_api_key(config, id_token).await?;
+    notify("OAuth tokens received. Requesting OpenAI API key...".to_string());
+    tokens.access_token = exchange_for_api_key(config, id_token)
+        .await
+        .context("ChatGPT OAuth succeeded, but OpenAI did not issue an API-key token. Kodo's OpenAI provider still requires an API-key-style credential, unlike Codex CLI")?;
     Ok(tokens)
 }
 
@@ -156,6 +178,9 @@ fn build_authorize_url(
         .append_pair("scope", config.scopes())
         .append_pair("code_challenge", challenge)
         .append_pair("code_challenge_method", "S256")
+        .append_pair("id_token_add_organizations", "true")
+        .append_pair("codex_cli_simplified_flow", "true")
+        .append_pair("originator", OPENAI_ORIGINATOR)
         .append_pair("state", state);
     Ok(url)
 }
@@ -173,6 +198,7 @@ async fn wait_for_callback(listener: TcpListener) -> Result<(String, String)> {
                 .context("failed to accept OAuth callback")?;
             let io = TokioIo::new(stream);
             http1::Builder::new()
+                .keep_alive(false)
                 .serve_connection(
                     io,
                     service_fn(move |request| handle_callback_request(request, Arc::clone(&tx))),
@@ -261,6 +287,7 @@ fn text_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
     Response::builder()
         .status(status)
         .header("content-type", "text/plain; charset=utf-8")
+        .header("connection", "close")
         .body(Full::new(Bytes::from(body.to_owned())))
         .expect("response should be valid")
 }
@@ -333,21 +360,23 @@ async fn exchange_for_api_key_with_client(
     config: &ProviderOAuthConfig,
     id_token: &str,
 ) -> Result<String> {
+    let form = vec![
+        (
+            "grant_type",
+            "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
+        ),
+        ("client_id", config.client_id().to_string()),
+        ("requested_token", "openai-api-key".to_string()),
+        ("subject_token", id_token.to_string()),
+        (
+            "subject_token_type",
+            "urn:ietf:params:oauth:token-type:id_token".to_string(),
+        ),
+    ];
+
     let response = client
         .post(config.token_url()?)
-        .form(&[
-            (
-                "grant_type",
-                "urn:ietf:params:oauth:grant-type:token-exchange",
-            ),
-            ("client_id", config.client_id()),
-            ("requested_token", "openai-api-key"),
-            ("subject_token", id_token),
-            (
-                "subject_token_type",
-                "urn:ietf:params:oauth:token-type:id_token",
-            ),
-        ])
+        .form(&form)
         .send()
         .await
         .context("failed to exchange id_token for OpenAI API key")?;
@@ -435,13 +464,8 @@ mod tests {
     #[test]
     fn authorize_url_contains_pkce_and_state() {
         let config = ProviderOAuthConfig::openai_default();
-        let url = build_authorize_url(
-            &config,
-            "http://127.0.0.1:9999/auth/callback",
-            "challenge-123",
-            "state-456",
-        )
-        .unwrap();
+        let url = build_authorize_url(&config, OPENAI_REDIRECT_URI, "challenge-123", "state-456")
+            .unwrap();
         let params: HashMap<_, _> = url.query_pairs().into_owned().collect();
 
         assert_eq!(url.path(), "/oauth/authorize");
@@ -456,7 +480,7 @@ mod tests {
         );
         assert_eq!(
             params.get("redirect_uri").map(String::as_str),
-            Some("http://127.0.0.1:9999/auth/callback")
+            Some(OPENAI_REDIRECT_URI)
         );
         assert_eq!(params.get("scope").map(String::as_str), Some(OPENAI_SCOPES));
         assert_eq!(
@@ -466,6 +490,18 @@ mod tests {
         assert_eq!(
             params.get("code_challenge_method").map(String::as_str),
             Some("S256")
+        );
+        assert_eq!(
+            params.get("id_token_add_organizations").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            params.get("codex_cli_simplified_flow").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            params.get("originator").map(String::as_str),
+            Some(OPENAI_ORIGINATOR)
         );
         assert_eq!(params.get("state").map(String::as_str), Some("state-456"));
     }
@@ -499,4 +535,5 @@ mod tests {
         let error = parse_callback_uri(&uri).unwrap_err();
         assert!(error.to_string().contains("missing state"));
     }
+
 }

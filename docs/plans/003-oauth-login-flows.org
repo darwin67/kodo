@@ -15,7 +15,9 @@ entirely — credentials are stored in the OS keychain and obtained via the
 * Scope
 
 Implement per-provider auth strategies:
-- *OpenAI*: OAuth2 Authorization Code + PKCE (matching the flow Codex CLI uses).
+- *OpenAI*: OAuth2 Authorization Code + PKCE (matching the flow Codex CLI
+  uses), but store ChatGPT OAuth tokens/account metadata directly rather than
+  assuming the login can always be converted into an API-key-style credential.
 - *Anthropic*: API key only (keychain -> prompt via ~--login~). Anthropic does
   not expose a public OAuth flow for direct API access.
 - *Gemini*: API key via ~--login gemini~ prompt, stored in keychain.
@@ -23,13 +25,18 @@ Implement per-provider auth strategies:
 A unified ~resolve_auth()~ chain handles: keychain (with refresh if supported)
 -> error with instructions to run ~--login~.
 
+As part of verification, the in-app slash command flow must also support:
+- Listing the coding-capable models available to the current credentials.
+- Selecting one of those models so the user can immediately test simple prompts
+  after login.
+
 * Provider Auth Matrix
 
-| Provider  | Auth Method        | OAuth Support | Token Refresh          | Header Format                   |
-|-----------+--------------------+---------------+------------------------+---------------------------------|
-| OpenAI    | OAuth (PKCE)       | Yes           | Yes                    | ~Authorization: Bearer <token>~ |
-| Anthropic | API key (keychain) | No            | No (keys don't expire) | ~x-api-key: <key>~              |
-| Gemini    | API key (keychain) | No            | No                     | ~x-goog-api-key: <key>~         |
+| Provider  | Auth Method             | OAuth Support | Token Refresh          | Header Format                                 |
+|-----------+-------------------------+---------------+------------------------+-----------------------------------------------|
+| OpenAI    | ChatGPT OAuth (PKCE)    | Yes           | Yes                    | ~Authorization: Bearer <token>~ + ~ChatGPT-Account-ID~ |
+| Anthropic | API key (keychain)      | No            | No (keys don't expire) | ~x-api-key: <key>~                            |
+| Gemini    | API key (keychain)      | No            | No                     | ~x-goog-api-key: <key>~                       |
 
 * Current State
 
@@ -73,14 +80,19 @@ our OpenAI provider.
 - *Client ID*: ~app_EMoamEEZ73f0CkXaXp7hrann~ (public client, no secret)
 - *Authorize URL*: ~https://auth.openai.com/oauth/authorize~
 - *Token URL*: ~https://auth.openai.com/oauth/token~
-- *Scopes*: ~openid profile email offline_access~
+- *Redirect URI*: ~http://localhost:1455/auth/callback~
+- *Scopes*: ~openid profile email offline_access api.connectors.read api.connectors.invoke~
+- *Extra authorize params*: ~id_token_add_organizations=true~,
+  ~codex_cli_simplified_flow=true~, ~originator=codex_cli_rs~
 - *PKCE*: S256, 64-byte random verifier, base64url-encoded (no padding)
 
 ** Authorization Code Flow (primary)
 
-1. Start local HTTP server on a random port.
+1. Start local HTTP server on ~localhost:1455~.
 2. Build authorize URL with ~response_type=code~, ~client_id~, ~redirect_uri~,
-   ~scope~, ~code_challenge~ (S256), ~code_challenge_method=S256~, ~state~.
+   ~scope~, ~code_challenge~ (S256), ~code_challenge_method=S256~, ~state~,
+   ~id_token_add_organizations~, ~codex_cli_simplified_flow~, and
+   ~originator~.
 3. Open user's browser to authorize URL.
 4. Receive callback at ~/auth/callback~ with ~code~ and ~state~ params.
 5. Exchange code for tokens via POST to token URL:
@@ -93,7 +105,36 @@ our OpenAI provider.
    #+end_src
 6. Response contains: ~id_token~, ~access_token~, ~refresh_token~.
 
-** API Key Exchange (post-login)
+** Investigation Findings (2026-04-15)
+
+- Browser OAuth is now confirmed working end-to-end through the local callback:
+  the browser reaches ~http://localhost:1455/auth/callback~ and shows
+  "Login successful! You can close this window."
+- The fixed callback port, extra authorize params, expanded scopes, and
+  explicit connection close on the callback response were all required to make
+  the browser flow reliable.
+- Kodo's TUI also needed explicit in-app notices during login. Printing the
+  login banner to stderr while the TUI was active was not sufficient.
+- The authorization-code exchange succeeds and returns ChatGPT OAuth tokens.
+- The follow-up RFC 8693 token exchange for ~requested_token=openai-api-key~
+  is *not* a reliable prerequisite for login in this environment. Live testing
+  hit:
+  - ~401 Unauthorized~ with ~"Invalid ID token: missing organization_id"~
+  - ~400 Bad Request~ with ~"Unknown parameter: 'organization_id'"~ when
+    attempting to supply that parameter manually
+- Inspecting the current Codex implementation shows that Codex does *not*
+  depend on the API-key exchange to function. It stores ChatGPT OAuth tokens as
+  first-class auth, uses the OAuth ~access_token~ as the bearer token, and also
+  sends ~ChatGPT-Account-ID~ derived from the ~id_token~.
+- For verification parity, successful login is not enough by itself. Kodo
+  should also be able to enumerate coding-capable models for the active auth
+  and select one in-app so a trivial prompt can confirm the credentials work
+  end-to-end.
+- Therefore the original plan assumption "OpenAI login returns an API key and
+  Kodo stores that as the provider secret" is incorrect for parity with current
+  Codex. The OpenAI provider path must support a ChatGPT-auth mode directly.
+
+** Optional API Key Exchange (post-login)
 
 After obtaining tokens, Codex performs a second token exchange (RFC 8693) to
 get an actual OpenAI API key:
@@ -109,6 +150,11 @@ subject_token_type=urn:ietf:params:oauth:token-type:id_token
 
 Response: ~{ access_token }~ — this is the API key used for subsequent requests.
 
+*Important finding*: In the current Codex implementation this step is
+best-effort and is *not* the core runtime auth path. Codex persists ChatGPT
+OAuth credentials even if API-key exchange is unavailable and continues by
+using the OAuth ~access_token~ plus ~ChatGPT-Account-ID~.
+
 ** Token Refresh
 
 #+begin_src text
@@ -121,7 +167,8 @@ Content-Type: application/json
 }
 #+end_src
 
-Codex proactively refreshes when the access token is within 8 minutes of expiry.
+Codex proactively refreshes when the ChatGPT OAuth access token is within
+8 minutes of expiry.
 
 ** Device Code Flow (headless fallback)
 
@@ -192,27 +239,33 @@ callback server. Only OpenAI has a full OAuth config.
 - ~OAuthTokens~ struct: ~access_token~, ~refresh_token~, ~id_token~, ~expires_in~.
 - ~run_openai_oauth_flow(config)~:
   1. Generate verifier/challenge/state
-  2. Bind TCP listener on random port, build authorize URL
+  2. Bind TCP listener on ~localhost:1455~, build authorize URL with the extra
+     Codex parameters
   3. Open browser; fall back to printing URL if that fails
   4. ~wait_for_callback(listener)~ → ~(code, state)~ with 120s timeout
   5. Verify returned state matches; bail on mismatch
   6. ~exchange_code_openai(...)~ → ~OAuthTokens~
-  7. ~exchange_for_api_key(issuer, client_id, id_token)~ → API key string
-  8. Return ~OAuthTokens~ with API key as ~access_token~
+  7. Return ChatGPT OAuth tokens unchanged; parse account metadata from
+     ~id_token~ for later request headers
+  8. Treat ~exchange_for_api_key(...)~ as optional/diagnostic only, not a hard
+     requirement for successful login
 - ~wait_for_callback~: hyper HTTP/1 server; parse ~?code=&state=~ from first
-  request; respond "Login successful!"; timeout after 120s.
+  request; respond "Login successful!"; explicitly close the HTTP connection;
+  timeout after 120s.
 - ~exchange_code_openai~: POST form-encoded to ~/oauth/token~; deserialize
   ~{ access_token, refresh_token, id_token, expires_in }~.
-- ~exchange_for_api_key~: RFC 8693 token exchange POST; return ~access_token~.
+- ~exchange_for_api_key~: RFC 8693 token exchange POST; optional helper only.
 
 *Checklist*:
 - [X] ~ProviderOAuthConfig~ enum exists with ~OpenAI~ variant
 - [X] ~openai_default()~ returns Codex-compatible config
 - [X] ~run_openai_oauth_flow()~ starts local server, opens browser, waits for callback,
-      exchanges code, then exchanges id_token for API key
+      and exchanges the authorization code for OAuth tokens
 - [X] CSRF protection via ~state~ parameter
 - [X] Timeout of 120 seconds on callback wait
 - [X] ~cargo build -p kodo-store~ succeeds
+- [ ] OpenAI auth path stores ChatGPT OAuth tokens/account metadata without
+      requiring API-key exchange
 
 ** DONE Step 4: Add ~refresh_if_needed()~ to ~auth.rs~
 
@@ -229,8 +282,10 @@ callback server. Only OpenAI has a full OAuth config.
 5. POST refresh to ~token_url~:
    - OpenAI: JSON body ~{ client_id, grant_type: "refresh_token", refresh_token }~
    - Standard: form-encoded same fields
-6. On success: if OpenAI and response has ~id_token~, re-exchange for API key.
-7. Compute new ~expires_at~ from ~expires_in~; call ~update_token()~; return new token.
+6. On success: persist refreshed ChatGPT OAuth ~access_token~, ~refresh_token~,
+   and parsed account metadata.
+7. Compute new ~expires_at~ from ~expires_in~; call ~update_token()~; return the
+   refreshed auth bundle.
 
 *Checklist*:
 - [X] ~refresh_if_needed()~ function exists in ~auth.rs~
@@ -238,15 +293,19 @@ callback server. Only OpenAI has a full OAuth config.
 - [X] Returns existing token if no expiry is set (API keys)
 - [X] Refreshes token if expired/near-expiry and refresh_token exists
 - [X] Uses JSON body for OpenAI refresh (matching Codex CLI)
-- [X] After OpenAI refresh, re-exchanges id_token for API key
 - [X] Returns ~None~ if expired with no refresh_token
 - [X] Updated token is saved to keychain + DB
 - [X] ~cargo build -p kodo-store~ succeeds
+- [ ] OpenAI refresh returns/stores ChatGPT OAuth auth, not an exchanged API key
 
 ** DONE Step 5: Add ~resolve_auth()~ function
 
 *What*: Unified auth resolution keyed on ~account_id~. Checks keychain only;
 no env var fallback. OpenAI accounts get token refresh; others do not.
+
+*Finding*: returning a plain token string is sufficient for Anthropic/Gemini but
+insufficient for OpenAI parity. The OpenAI provider needs an auth bundle
+(bearer token + ChatGPT account id, and likely provider-specific mode info).
 
 *File*: ~crates/kodo-store/src/auth.rs~
 
@@ -270,13 +329,18 @@ no env var fallback. OpenAI accounts get token refresh; others do not.
 path. OpenAI runs OAuth; Anthropic/Gemini prompt for an API key (saved to
 keychain).
 
+*Finding*: the runtime command should treat "browser OAuth completed" as a
+distinct milestone from "OpenAI provider credentials are fully usable". The
+current OpenAI provider integration still blocks successful end-to-end login.
+
 *File*: ~src/main.rs~
 
 In ~handle_login_command() / login_provider()~: match on provider string → run
 OAuth flow or prompt for key → call ~save_token()~.
 
 *Checklist*:
-- [X] ~\/login openai~ runs full OAuth flow and saves tokens
+- [ ] ~\/login openai~ runs full OAuth flow and saves ChatGPT OAuth tokens in a
+      form usable by the OpenAI provider
 - [X] ~\/login anthropic~ prompts for API key and saves to keychain
 - [X] ~\/login gemini~ prompts for API key and saves to keychain
 - [X] Unknown providers print an error
@@ -287,13 +351,16 @@ OAuth flow or prompt for key → call ~save_token()~.
 *What*: Replace ~from_env()~ with ~resolve_auth(account_id)~ in each LLM provider.
 The ~account_id~ comes from the active session/thread configuration.
 
-- ~openai.rs~: ~resolve_auth(account_id)~ → ~Authorization: Bearer {token}~
+- ~openai.rs~: use a provider-specific auth bundle:
+  ~Authorization: Bearer {oauth_access_token}~ plus
+  ~ChatGPT-Account-ID: {chatgpt_account_id}~
 - ~anthropic.rs~: ~resolve_auth(account_id)~ → ~x-api-key: {token}~
 - ~gemini.rs~: ~resolve_auth(account_id)~ → ~x-goog-api-key: {token}~
 
 *Checklist*:
 - [ ] All three providers use ~resolve_auth()~ (no ~from_env()~ calls remain)
-- [ ] Each provider uses the correct header format
+- [ ] OpenAI uses ChatGPT OAuth bearer auth plus ~ChatGPT-Account-ID~
+- [ ] Anthropic/Gemini use the correct API-key header format
 - [ ] ~cargo build~ succeeds
 
 ** DONE Step 8: Export ~oauth~ module
@@ -313,7 +380,13 @@ Add ~pub mod oauth;~.
 - [ ] ~cargo test --workspace~ all pass
 - [ ] ~cargo clippy --workspace~ no warnings
 - [ ] PKCE verifier/challenge generation works
-- [ ] OpenAI: ~\/login openai~ opens browser, completes OAuth, saves API key
+- [ ] OpenAI: ~\/login openai~ opens browser, completes OAuth, saves ChatGPT
+      OAuth credentials, and the OpenAI provider can use them without API-key
+      exchange
+- [ ] Slash command flow lists coding-capable models for the active
+      credentials
+- [ ] Slash command flow sets the selected model and a trivial prompt succeeds
+      with the chosen model
 - [ ] Anthropic: ~\/login anthropic~ prompts for key, saves to keychain
 - [ ] Gemini: ~\/login gemini~ prompts for key, saves to keychain
 - [ ] ~resolve_auth()~ resolves from keychain only (no env var fallback)

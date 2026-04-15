@@ -253,7 +253,9 @@ async fn execute_command(
             let _ = req_tx.send(AgentRequest::ListProviders);
         }
         Command::LoginProvider { provider, name } => {
-            if let Err(error) =
+            if provider == "openai" {
+                start_openai_login(agent_tx.clone(), name);
+            } else if let Err(error) =
                 handle_login_command(terminal, events, agent_tx, &provider, name.clone()).await
             {
                 let _ = agent_tx.send(AgentEvent::Error(format!("{error:#}")));
@@ -269,6 +271,22 @@ async fn execute_command(
             // No-op
         }
     }
+}
+
+fn start_openai_login(agent_tx: mpsc::UnboundedSender<AgentEvent>, name: Option<String>) {
+    let _ = agent_tx.send(AgentEvent::Notice(
+        "Starting OpenAI login. Finish the OAuth flow in your browser.".to_string(),
+    ));
+    tokio::spawn(async move {
+        match login_openai_provider(&agent_tx).await {
+            Ok(account_id) => {
+                let _ = agent_tx.send(AgentEvent::LoginComplete { account_id, name });
+            }
+            Err(error) => {
+                let _ = agent_tx.send(AgentEvent::Error(format!("{error:#}")));
+            }
+        }
+    });
 }
 
 /// Map AgentEvent to application Message.
@@ -336,22 +354,7 @@ async fn login_provider(provider: &str) -> Result<String> {
 
     match provider {
         "openai" => {
-            eprintln!(
-                "Logging in to `openai`. Your browser will open for OAuth and credentials will be stored in the OS keychain."
-            );
-            let tokens =
-                kodo_store::oauth::run_openai_oauth_flow(&ProviderOAuthConfig::openai_default())
-                    .await?;
-            let expires_at = tokens.expires_in.map(format_oauth_expiry);
-            auth::save_token(
-                &pool,
-                &store,
-                provider,
-                &tokens.access_token,
-                tokens.refresh_token.as_deref(),
-                expires_at.as_deref(),
-            )
-            .await?;
+            return login_openai_provider_silent().await;
         }
         "anthropic" | "gemini" => {
             let prompt = match provider {
@@ -376,6 +379,56 @@ async fn login_provider(provider: &str) -> Result<String> {
     }
 
     Ok(provider.to_string())
+}
+
+async fn login_openai_provider(agent_tx: &mpsc::UnboundedSender<AgentEvent>) -> Result<String> {
+    let pool = db::open(&db::default_db_path()).await?;
+    let store = KeychainStore;
+    let tx = agent_tx.clone();
+    let tokens = kodo_store::oauth::run_openai_oauth_flow_with_notifier(
+        &ProviderOAuthConfig::openai_default(),
+        Box::new(move |notice| {
+            let _ = tx.send(AgentEvent::Notice(notice));
+        }),
+    )
+    .await?;
+
+    let _ = agent_tx.send(AgentEvent::Notice(
+        "OpenAI API key received. Saving credentials to the OS keychain...".to_string(),
+    ));
+
+    let expires_at = tokens.expires_in.map(format_oauth_expiry);
+    auth::save_token(
+        &pool,
+        &store,
+        "openai",
+        &tokens.access_token,
+        tokens.refresh_token.as_deref(),
+        expires_at.as_deref(),
+    )
+    .await?;
+
+    Ok("openai".to_string())
+}
+
+async fn login_openai_provider_silent() -> Result<String> {
+    let pool = db::open(&db::default_db_path()).await?;
+    let store = KeychainStore;
+    let tokens =
+        kodo_store::oauth::run_openai_oauth_flow(&ProviderOAuthConfig::openai_default()).await?;
+
+    let expires_at = tokens.expires_in.map(format_oauth_expiry);
+    auth::save_token(
+        &pool,
+        &store,
+        "openai",
+        &tokens.access_token,
+        tokens.refresh_token.as_deref(),
+        expires_at.as_deref(),
+    )
+    .await?;
+
+    Ok("openai".to_string())
 }
 
 fn format_oauth_expiry(expires_in: i64) -> String {
