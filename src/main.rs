@@ -370,7 +370,7 @@ async fn login_provider(provider: &str) -> Result<String> {
                 bail!("No credential entered.");
             }
 
-            auth::save_token(&pool, &store, provider, &secret, None, None).await?;
+            auth::save_token(&pool, &store, provider, &secret, None, None, None).await?;
         }
         "ollama" => bail!("`ollama` does not require login."),
         other => bail!(
@@ -393,8 +393,13 @@ async fn login_openai_provider(agent_tx: &mpsc::UnboundedSender<AgentEvent>) -> 
     )
     .await?;
 
+    let metadata = tokens
+        .id_token
+        .as_deref()
+        .map(kodo_store::oauth::parse_openai_id_token_metadata)
+        .transpose()?;
     let _ = agent_tx.send(AgentEvent::Notice(
-        "OpenAI API key received. Saving credentials to the OS keychain...".to_string(),
+        "OpenAI OAuth tokens received. Saving credentials to the OS keychain...".to_string(),
     ));
 
     let expires_at = tokens.expires_in.map(format_oauth_expiry);
@@ -405,6 +410,7 @@ async fn login_openai_provider(agent_tx: &mpsc::UnboundedSender<AgentEvent>) -> 
         &tokens.access_token,
         tokens.refresh_token.as_deref(),
         expires_at.as_deref(),
+        metadata.as_ref().and_then(|meta| meta.chatgpt_account_id.as_deref()),
     )
     .await?;
 
@@ -416,6 +422,11 @@ async fn login_openai_provider_silent() -> Result<String> {
     let store = KeychainStore;
     let tokens =
         kodo_store::oauth::run_openai_oauth_flow(&ProviderOAuthConfig::openai_default()).await?;
+    let metadata = tokens
+        .id_token
+        .as_deref()
+        .map(kodo_store::oauth::parse_openai_id_token_metadata)
+        .transpose()?;
 
     let expires_at = tokens.expires_in.map(format_oauth_expiry);
     auth::save_token(
@@ -425,6 +436,7 @@ async fn login_openai_provider_silent() -> Result<String> {
         &tokens.access_token,
         tokens.refresh_token.as_deref(),
         expires_at.as_deref(),
+        metadata.as_ref().and_then(|meta| meta.chatgpt_account_id.as_deref()),
     )
     .await?;
 

@@ -1311,6 +1311,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "futures",
+ "kodo-store",
  "pin-project-lite",
  "reqwest",
  "serde",

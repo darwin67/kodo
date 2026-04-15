@@ -12,6 +12,9 @@ use crate::types::{
     CompletionRequest, CompletionResponse, ContentBlock, Message, ModelInfo, Role, StopReason,
     StreamEvent, ToolCallingSupport, ToolDefinition, Usage,
 };
+use kodo_store::auth;
+use kodo_store::crypto::KeychainStore;
+use kodo_store::db;
 
 const DEFAULT_API_BASE: &str = "https://api.openai.com/v1";
 
@@ -283,7 +286,14 @@ fn parse_stop_reason(reason: Option<&str>) -> StopReason {
 pub struct OpenAiProvider {
     client: Client,
     api_key: String,
+    account_id: Option<String>,
     api_base: String,
+    allow_stored_auth: bool,
+}
+
+struct ResolvedOpenAiAuth {
+    bearer_token: String,
+    account_id: Option<String>,
 }
 
 impl OpenAiProvider {
@@ -292,7 +302,20 @@ impl OpenAiProvider {
         Self {
             client: Client::new(),
             api_key,
+            account_id: None,
             api_base: DEFAULT_API_BASE.to_string(),
+            allow_stored_auth: false,
+        }
+    }
+
+    /// Create a provider configured for ChatGPT OAuth bearer auth.
+    pub fn with_chatgpt_auth(access_token: String, account_id: Option<String>) -> Self {
+        Self {
+            client: Client::new(),
+            api_key: access_token,
+            account_id,
+            api_base: DEFAULT_API_BASE.to_string(),
+            allow_stored_auth: false,
         }
     }
 
@@ -310,7 +333,9 @@ impl OpenAiProvider {
         Ok(Self {
             client: Client::new(),
             api_key,
+            account_id: None,
             api_base,
+            allow_stored_auth: false,
         })
     }
 
@@ -320,17 +345,33 @@ impl OpenAiProvider {
         Self {
             client: Client::new(),
             api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+            account_id: None,
             api_base,
+            allow_stored_auth: true,
         }
     }
 
-    fn ensure_api_key(&self) -> Result<()> {
-        if self.api_key.trim().is_empty() {
-            bail!(
-                "OpenAI API key not configured. Set OPENAI_API_KEY or start with --provider ollama"
-            );
+    async fn resolve_auth(&self) -> Result<ResolvedOpenAiAuth> {
+        if !self.api_key.trim().is_empty() {
+            return Ok(ResolvedOpenAiAuth {
+                bearer_token: self.api_key.clone(),
+                account_id: self.account_id.clone(),
+            });
         }
-        Ok(())
+
+        if self.allow_stored_auth {
+            let pool = db::open(&db::default_db_path()).await?;
+            let store = KeychainStore;
+            let token = auth::resolve_auth(&pool, &store, "openai").await?;
+            return Ok(ResolvedOpenAiAuth {
+                bearer_token: token.token,
+                account_id: token.account_id,
+            });
+        }
+
+        bail!(
+            "OpenAI credentials not configured. Set OPENAI_API_KEY or run /login openai."
+        );
     }
 
     fn build_api_request(&self, request: &CompletionRequest, stream: bool) -> ApiRequest {
@@ -349,19 +390,34 @@ impl OpenAiProvider {
             },
         }
     }
+
+    fn apply_auth_headers(
+        &self,
+        request: reqwest::RequestBuilder,
+        auth: &ResolvedOpenAiAuth,
+    ) -> reqwest::RequestBuilder {
+        let request = request.header("Authorization", format!("Bearer {}", auth.bearer_token));
+        if let Some(account_id) = auth.account_id.as_deref() {
+            request.header("ChatGPT-Account-ID", account_id)
+        } else {
+            request
+        }
+    }
 }
 
 #[async_trait]
 impl Provider for OpenAiProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
-        self.ensure_api_key()?;
+        let auth = self.resolve_auth().await?;
         let api_req = self.build_api_request(&request, false);
 
         let resp = self
-            .client
-            .post(format!("{}/chat/completions", self.api_base))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
+            .apply_auth_headers(
+                self.client
+                    .post(format!("{}/chat/completions", self.api_base))
+                    .header("Content-Type", "application/json"),
+                &auth,
+            )
             .json(&api_req)
             .send()
             .await
@@ -417,14 +473,16 @@ impl Provider for OpenAiProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
-        self.ensure_api_key()?;
+        let auth = self.resolve_auth().await?;
         let api_req = self.build_api_request(&request, true);
 
         let resp = self
-            .client
-            .post(format!("{}/chat/completions", self.api_base))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
+            .apply_auth_headers(
+                self.client
+                    .post(format!("{}/chat/completions", self.api_base))
+                    .header("Content-Type", "application/json"),
+                &auth,
+            )
             .json(&api_req)
             .send()
             .await
@@ -844,7 +902,7 @@ mod tests {
 
         let provider = OpenAiProvider::from_env_or_empty();
         assert!(provider.api_key.is_empty());
-        assert!(provider.ensure_api_key().is_err());
+        assert!(provider.allow_stored_auth);
 
         if let Some(key) = original {
             unsafe { std::env::set_var("OPENAI_API_KEY", key) };
@@ -856,5 +914,37 @@ mod tests {
         let provider =
             OpenAiProvider::new("key".into()).with_base_url("http://localhost:11434/v1".into());
         assert_eq!(provider.api_base, "http://localhost:11434/v1");
+    }
+
+    #[test]
+    fn apply_auth_headers_includes_chatgpt_account_header_when_present() {
+        let provider = OpenAiProvider::with_chatgpt_auth(
+            "oauth-access".into(),
+            Some("acct-123".into()),
+        )
+        .with_base_url("http://localhost:11434/v1".into());
+        let auth = ResolvedOpenAiAuth {
+            bearer_token: "oauth-access".into(),
+            account_id: Some("acct-123".into()),
+        };
+        let request = provider
+            .apply_auth_headers(provider.client.post("http://localhost/test"), &auth)
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer oauth-access")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("chatgpt-account-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("acct-123")
+        );
     }
 }

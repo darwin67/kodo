@@ -17,6 +17,7 @@ pub struct AuthToken {
     pub token: String,
     pub refresh_token: Option<String>,
     pub expires_at: Option<String>,
+    pub account_id: Option<String>,
 }
 
 /// Store or update an auth token for a provider.
@@ -30,6 +31,7 @@ pub async fn save_token(
     token: &str,
     refresh_token: Option<&str>,
     expires_at: Option<&str>,
+    account_id: Option<&str>,
 ) -> Result<()> {
     debug!(provider, "saving auth token");
 
@@ -39,6 +41,11 @@ pub async fn save_token(
         crypto::set_secret(store, provider, "refresh_token", rt)?;
     } else {
         crypto::delete_secret(store, provider, "refresh_token")?;
+    }
+    if let Some(account_id) = account_id {
+        crypto::set_secret(store, provider, "account_id", account_id)?;
+    } else {
+        crypto::delete_secret(store, provider, "account_id")?;
     }
 
     // Track provider metadata in DB (no secrets).
@@ -82,12 +89,14 @@ pub async fn get_token(
     };
 
     let refresh_token = crypto::get_secret(store, &provider_name, "refresh_token")?;
+    let account_id = crypto::get_secret(store, &provider_name, "account_id")?;
 
     Ok(Some(AuthToken {
         provider: provider_name,
         token,
         refresh_token,
         expires_at,
+        account_id,
     }))
 }
 
@@ -149,7 +158,7 @@ async fn refresh_openai_token(
         .id_token
         .as_deref()
         .context("OpenAI refresh response did not include an id_token")?;
-    let api_key = exchange_for_api_key_with_client(client, config, id_token).await?;
+    let metadata = oauth::parse_openai_id_token_metadata(id_token)?;
     let next_refresh_token = refreshed.refresh_token.as_deref().unwrap_or(refresh_token);
     let expires_at = refreshed.expires_in.map(format_expires_at);
 
@@ -157,56 +166,14 @@ async fn refresh_openai_token(
         pool,
         store,
         account_id,
-        &api_key,
+        &refreshed.access_token,
         Some(next_refresh_token),
         expires_at.as_deref(),
+        metadata.chatgpt_account_id.as_deref(),
     )
     .await?;
 
     get_token(pool, store, account_id).await
-}
-
-async fn exchange_for_api_key_with_client(
-    client: &Client,
-    config: &ProviderOAuthConfig,
-    id_token: &str,
-) -> Result<String> {
-    let response = client
-        .post(config.token_url()?)
-        .form(&[
-            (
-                "grant_type",
-                "urn:ietf:params:oauth:grant-type:token-exchange",
-            ),
-            ("client_id", config.client_id()),
-            ("requested_token", "openai-api-key"),
-            ("subject_token", id_token),
-            (
-                "subject_token_type",
-                "urn:ietf:params:oauth:token-type:id_token",
-            ),
-        ])
-        .send()
-        .await
-        .context("failed to exchange id_token for OpenAI API key")?;
-
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .context("failed to read OpenAI API key exchange response")?;
-    if !status.is_success() {
-        bail!("OpenAI OAuth failed to exchange id_token for API key ({status}): {body}");
-    }
-
-    #[derive(Deserialize)]
-    struct ApiKeyExchange {
-        access_token: String,
-    }
-
-    let payload: ApiKeyExchange =
-        serde_json::from_str(&body).context("failed to parse OpenAI API key exchange response")?;
-    Ok(payload.access_token)
 }
 
 /// Resolve the stored auth for a provider, refreshing it when supported.
@@ -234,6 +201,7 @@ pub async fn delete_token(pool: &DbPool, store: &dyn SecretStore, provider: &str
 
     crypto::delete_secret(store, provider, "token")?;
     crypto::delete_secret(store, provider, "refresh_token")?;
+    crypto::delete_secret(store, provider, "account_id")?;
 
     sqlx::query("DELETE FROM auth_providers WHERE provider = ?")
         .bind(provider)
@@ -275,6 +243,7 @@ fn format_expires_at(expires_in: i64) -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::io::ErrorKind;
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -297,8 +266,8 @@ mod tests {
 
     async fn spawn_token_server(
         responses: Vec<String>,
-    ) -> (String, Arc<Mutex<Vec<RecordedRequest>>>, JoinHandle<()>) {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    ) -> Result<(String, Arc<Mutex<Vec<RecordedRequest>>>, JoinHandle<()>)> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let addr = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&requests);
@@ -317,7 +286,7 @@ mod tests {
             }
         });
 
-        (format!("http://{addr}"), requests, handle)
+        Ok((format!("http://{addr}"), requests, handle))
     }
 
     async fn read_http_request(stream: &mut tokio::net::TcpStream) -> RecordedRequest {
@@ -371,20 +340,21 @@ mod tests {
     async fn save_and_get_token_roundtrip() {
         let pool = open_memory().await.unwrap();
         let s = store();
-        save_token(&pool, &s, "anthropic", "sk-ant-123", None, None)
+        save_token(&pool, &s, "anthropic", "sk-ant-123", None, None, None)
             .await
             .unwrap();
 
         let token = get_token(&pool, &s, "anthropic").await.unwrap().unwrap();
         assert_eq!(token.token, "sk-ant-123");
         assert!(token.refresh_token.is_none());
+        assert!(token.account_id.is_none());
     }
 
     #[tokio::test]
     async fn db_stores_no_secrets() {
         let pool = open_memory().await.unwrap();
         let s = store();
-        save_token(&pool, &s, "openai", "secret-key", None, None)
+        save_token(&pool, &s, "openai", "secret-key", None, None, None)
             .await
             .unwrap();
 
@@ -403,10 +373,10 @@ mod tests {
     async fn upsert_token() {
         let pool = open_memory().await.unwrap();
         let s = store();
-        save_token(&pool, &s, "openai", "key-1", None, None)
+        save_token(&pool, &s, "openai", "key-1", None, None, None)
             .await
             .unwrap();
-        save_token(&pool, &s, "openai", "key-2", Some("refresh-2"), None)
+        save_token(&pool, &s, "openai", "key-2", Some("refresh-2"), None, None)
             .await
             .unwrap();
 
@@ -426,6 +396,7 @@ mod tests {
             "access",
             Some("refresh-secret"),
             Some("2025-12-31"),
+            None,
         )
         .await
         .unwrap();
@@ -448,7 +419,7 @@ mod tests {
     async fn delete_token_works() {
         let pool = open_memory().await.unwrap();
         let s = store();
-        save_token(&pool, &s, "anthropic", "key", None, None)
+        save_token(&pool, &s, "anthropic", "key", None, None, None)
             .await
             .unwrap();
         delete_token(&pool, &s, "anthropic").await.unwrap();
@@ -466,10 +437,10 @@ mod tests {
     async fn list_providers_works() {
         let pool = open_memory().await.unwrap();
         let s = store();
-        save_token(&pool, &s, "anthropic", "a", None, None)
+        save_token(&pool, &s, "anthropic", "a", None, None, None)
             .await
             .unwrap();
-        save_token(&pool, &s, "openai", "b", None, None)
+        save_token(&pool, &s, "openai", "b", None, None, None)
             .await
             .unwrap();
 
@@ -481,7 +452,7 @@ mod tests {
     async fn refresh_if_needed_returns_existing_token_without_expiry() {
         let pool = open_memory().await.unwrap();
         let s = store();
-        save_token(&pool, &s, "anthropic", "sk-ant-123", None, None)
+        save_token(&pool, &s, "anthropic", "sk-ant-123", None, None, None)
             .await
             .unwrap();
 
@@ -505,6 +476,7 @@ mod tests {
             "existing-api-key",
             Some("refresh-1"),
             Some(&expires_at),
+            None,
         )
         .await
         .unwrap();
@@ -522,7 +494,15 @@ mod tests {
         let pool = open_memory().await.unwrap();
         let s = store();
         let expires_at = (Utc::now() - Duration::minutes(5)).to_rfc3339();
-        save_token(&pool, &s, "openai", "expired-key", None, Some(&expires_at))
+        save_token(
+            &pool,
+            &s,
+            "openai",
+            "expired-key",
+            None,
+            Some(&expires_at),
+            None,
+        )
             .await
             .unwrap();
 
@@ -542,15 +522,25 @@ mod tests {
             "stale-api-key",
             Some("refresh-1"),
             Some(&expires_at),
+            None,
         )
         .await
         .unwrap();
 
-        let (issuer, requests, server) = spawn_token_server(vec![
-            r#"{"access_token":"oauth-access","refresh_token":"refresh-2","id_token":"id-2","expires_in":3600}"#.to_string(),
-            r#"{"access_token":"api-key-2"}"#.to_string(),
-        ])
-        .await;
+        let id_token = "header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdC0yIn19.sig";
+        let (issuer, requests, server) = match spawn_token_server(vec![format!(
+            r#"{{"access_token":"oauth-access","refresh_token":"refresh-2","id_token":"{id_token}","expires_in":3600}}"#
+        )])
+        .await
+        {
+            Ok(server) => server,
+            Err(error) if error.downcast_ref::<std::io::Error>().map(|io| io.kind())
+                == Some(ErrorKind::PermissionDenied) =>
+            {
+                return;
+            }
+            Err(error) => panic!("failed to start mock token server: {error:#}"),
+        };
         let config = ProviderOAuthConfig::OpenAI {
             issuer,
             client_id: "app-test".to_string(),
@@ -563,12 +553,13 @@ mod tests {
             .unwrap();
         server.await.unwrap();
 
-        assert_eq!(token.token, "api-key-2");
+        assert_eq!(token.token, "oauth-access");
         assert_eq!(token.refresh_token.as_deref(), Some("refresh-2"));
+        assert_eq!(token.account_id.as_deref(), Some("acct-2"));
         assert!(parse_expires_at(token.expires_at.as_deref().unwrap()).unwrap() > Utc::now());
 
         let recorded = requests.lock().unwrap().clone();
-        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].path, "/oauth/token");
         assert_eq!(
             recorded[0].content_type.as_deref(),
@@ -576,26 +567,18 @@ mod tests {
         );
         assert!(recorded[0].body.contains(r#""grant_type":"refresh_token""#));
         assert!(recorded[0].body.contains(r#""refresh_token":"refresh-1""#));
-        assert_eq!(recorded[1].path, "/oauth/token");
-        assert!(
-            recorded[1]
-                .content_type
-                .as_deref()
-                .unwrap_or_default()
-                .starts_with("application/x-www-form-urlencoded")
-        );
-        assert!(recorded[1].body.contains("requested_token=openai-api-key"));
 
         let persisted = get_token(&pool, &s, "openai").await.unwrap().unwrap();
-        assert_eq!(persisted.token, "api-key-2");
+        assert_eq!(persisted.token, "oauth-access");
         assert_eq!(persisted.refresh_token.as_deref(), Some("refresh-2"));
+        assert_eq!(persisted.account_id.as_deref(), Some("acct-2"));
     }
 
     #[tokio::test]
     async fn resolve_auth_returns_existing_api_key_for_non_openai_provider() {
         let pool = open_memory().await.unwrap();
         let s = store();
-        save_token(&pool, &s, "gemini", "gemini-key", None, None)
+        save_token(&pool, &s, "gemini", "gemini-key", None, None, None)
             .await
             .unwrap();
 

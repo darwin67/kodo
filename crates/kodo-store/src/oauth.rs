@@ -91,9 +91,45 @@ pub struct OAuthTokens {
     pub expires_in: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAiAuthMetadata {
+    pub email: Option<String>,
+    pub chatgpt_plan_type: Option<String>,
+    pub chatgpt_user_id: Option<String>,
+    pub chatgpt_account_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ApiKeyExchangeResponse {
     access_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiIdClaims {
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(rename = "https://api.openai.com/profile", default)]
+    profile: Option<OpenAiProfileClaims>,
+    #[serde(rename = "https://api.openai.com/auth", default)]
+    auth: Option<OpenAiAuthClaims>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiProfileClaims {
+    #[serde(default)]
+    email: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiAuthClaims {
+    #[serde(default)]
+    chatgpt_plan_type: Option<String>,
+    #[serde(default)]
+    chatgpt_user_id: Option<String>,
+    #[serde(default)]
+    user_id: Option<String>,
+    #[serde(default)]
+    chatgpt_account_id: Option<String>,
 }
 
 /// Generate a PKCE code verifier from 64 random bytes.
@@ -151,16 +187,12 @@ where
 
     notify("Browser login completed. Exchanging OAuth tokens...".to_string());
 
-    let mut tokens =
-        exchange_code_openai(config, &code, OPENAI_REDIRECT_URI, &code_verifier).await?;
-    let id_token = tokens
+    let tokens = exchange_code_openai(config, &code, OPENAI_REDIRECT_URI, &code_verifier).await?;
+    tokens
         .id_token
         .as_deref()
         .context("OpenAI OAuth response did not include an id_token")?;
-    notify("OAuth tokens received. Requesting OpenAI API key...".to_string());
-    tokens.access_token = exchange_for_api_key(config, id_token)
-        .await
-        .context("ChatGPT OAuth succeeded, but OpenAI did not issue an API-key token. Kodo's OpenAI provider still requires an API-key-style credential, unlike Codex CLI")?;
+    notify("OAuth tokens received.".to_string());
     Ok(tokens)
 }
 
@@ -411,6 +443,50 @@ fn random_base64url(byte_len: usize) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
+pub fn parse_openai_id_token_metadata(id_token: &str) -> Result<OpenAiAuthMetadata> {
+    let claims = decode_jwt_payload::<OpenAiIdClaims>(id_token)?;
+    let email = claims
+        .email
+        .or_else(|| claims.profile.and_then(|profile| profile.email));
+
+    let metadata = match claims.auth {
+        Some(auth) => OpenAiAuthMetadata {
+            email,
+            chatgpt_plan_type: auth.chatgpt_plan_type,
+            chatgpt_user_id: auth.chatgpt_user_id.or(auth.user_id),
+            chatgpt_account_id: auth.chatgpt_account_id,
+        },
+        None => OpenAiAuthMetadata {
+            email,
+            chatgpt_plan_type: None,
+            chatgpt_user_id: None,
+            chatgpt_account_id: None,
+        },
+    };
+
+    Ok(metadata)
+}
+
+fn decode_jwt_payload<T>(jwt: &str) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let mut parts = jwt.split('.');
+    let (_header, payload, _signature) = match (parts.next(), parts.next(), parts.next()) {
+        (Some(header), Some(payload), Some(signature))
+            if !header.is_empty() && !payload.is_empty() && !signature.is_empty() =>
+        {
+            (header, payload, signature)
+        }
+        _ => bail!("invalid JWT format"),
+    };
+
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(payload)
+        .context("failed to decode JWT payload")?;
+    serde_json::from_slice(&payload_bytes).context("failed to parse JWT payload")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,6 +610,16 @@ mod tests {
         let uri: hyper::Uri = "/auth/callback?code=abc".parse().unwrap();
         let error = parse_callback_uri(&uri).unwrap_err();
         assert!(error.to_string().contains("missing state"));
+    }
+
+    #[test]
+    fn parse_openai_id_token_metadata_extracts_account_fields() {
+        let token = "header.eyJlbWFpbCI6ImRhcndpbkBleGFtcGxlLmNvbSIsImh0dHBzOi8vYXBpLm9wZW5haS5jb20vYXV0aCI6eyJjaGF0Z3B0X3BsYW5fdHlwZSI6InBsdXMiLCJjaGF0Z3B0X3VzZXJfaWQiOiJ1c2VyLTEyMyIsImNoYXRncHRfYWNjb3VudF9pZCI6ImFjY3QtNDU2In19.sig";
+        let metadata = parse_openai_id_token_metadata(token).unwrap();
+        assert_eq!(metadata.email.as_deref(), Some("darwin@example.com"));
+        assert_eq!(metadata.chatgpt_plan_type.as_deref(), Some("plus"));
+        assert_eq!(metadata.chatgpt_user_id.as_deref(), Some("user-123"));
+        assert_eq!(metadata.chatgpt_account_id.as_deref(), Some("acct-456"));
     }
 
 }
