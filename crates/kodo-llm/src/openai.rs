@@ -87,6 +87,16 @@ struct ApiResponse {
 }
 
 #[derive(Deserialize, Debug)]
+struct ApiModelsResponse {
+    data: Vec<ApiModel>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ApiModel {
+    id: String,
+}
+
+#[derive(Deserialize, Debug)]
 struct ApiChoice {
     message: ApiResponseMessage,
     finish_reason: Option<String>,
@@ -276,6 +286,49 @@ fn parse_stop_reason(reason: Option<&str>) -> StopReason {
         Some("length") => StopReason::MaxTokens,
         _ => StopReason::EndTurn,
     }
+}
+
+fn is_coding_model_id(model_id: &str) -> bool {
+    let model_id = model_id.to_ascii_lowercase();
+    let matches_coding_family = ["gpt-5", "gpt-4.1", "gpt-4o", "o3", "o4", "codex"]
+        .iter()
+        .any(|prefix| model_id.starts_with(prefix));
+    let is_non_coding_variant = [
+        "audio",
+        "image",
+        "realtime",
+        "search",
+        "deep-research",
+        "moderation",
+        "embedding",
+        "transcribe",
+        "transcription",
+        "tts",
+        "omni-moderation",
+        "whisper",
+    ]
+    .iter()
+    .any(|needle| model_id.contains(needle));
+
+    matches_coding_family && !is_non_coding_variant
+}
+
+fn parse_coding_models_response(body: &str) -> Result<Vec<ModelInfo>> {
+    let mut models: Vec<ModelInfo> = serde_json::from_str::<ApiModelsResponse>(body)
+        .context("failed to parse OpenAI models response")?
+        .data
+        .into_iter()
+        .filter(|model| is_coding_model_id(&model.id))
+        .map(|model| ModelInfo {
+            name: model.id.clone(),
+            id: model.id,
+            context_window: 0,
+        })
+        .collect();
+
+    models.sort_by(|left, right| left.id.cmp(&right.id));
+    models.dedup_by(|left, right| left.id == right.id);
+    Ok(models)
 }
 
 // ---------------------------------------------------------------------------
@@ -630,23 +683,25 @@ impl Provider for OpenAiProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        Ok(vec![
-            ModelInfo {
-                id: "gpt-4o".into(),
-                name: "GPT-4o".into(),
-                context_window: 128_000,
-            },
-            ModelInfo {
-                id: "gpt-4o-mini".into(),
-                name: "GPT-4o Mini".into(),
-                context_window: 128_000,
-            },
-            ModelInfo {
-                id: "o3-mini".into(),
-                name: "o3-mini".into(),
-                context_window: 200_000,
-            },
-        ])
+        let auth = self.resolve_auth().await?;
+        let response = self
+            .apply_auth_headers(self.client.get(format!("{}/models", self.api_base)), &auth)
+            .send()
+            .await
+            .context("failed to list OpenAI models")?;
+
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            bail!("OpenAI models API error ({}): {}", status, body);
+        }
+
+        let models = parse_coding_models_response(&body)?;
+        if models.is_empty() {
+            bail!("No coding-capable OpenAI models were returned for the current credentials.");
+        }
+
+        Ok(models)
     }
 }
 
@@ -874,12 +929,30 @@ mod tests {
         assert_eq!(provider.tool_calling_support(), ToolCallingSupport::Native);
     }
 
-    #[tokio::test]
-    async fn provider_list_models() {
-        let provider = OpenAiProvider::new("key".into());
-        let models = provider.list_models().await.unwrap();
-        assert!(!models.is_empty());
-        assert!(models.iter().any(|m| m.id.contains("gpt-4o")));
+    #[test]
+    fn parse_coding_models_response_filters_non_coding_models() {
+        let body = r#"{
+            "data": [
+                {"id": "gpt-5"},
+                {"id": "gpt-4.1-mini"},
+                {"id": "o4-mini"},
+                {"id": "gpt-image-1"},
+                {"id": "gpt-4o-realtime-preview"},
+                {"id": "text-embedding-3-large"}
+            ]
+        }"#;
+
+        let models = parse_coding_models_response(body).unwrap();
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, vec!["gpt-4.1-mini", "gpt-5", "o4-mini"]);
+    }
+
+    #[test]
+    fn coding_model_filter_rejects_non_coding_variants() {
+        assert!(is_coding_model_id("gpt-5"));
+        assert!(is_coding_model_id("codex-mini-latest"));
+        assert!(!is_coding_model_id("gpt-image-1"));
+        assert!(!is_coding_model_id("gpt-4o-realtime-preview"));
     }
 
     #[test]

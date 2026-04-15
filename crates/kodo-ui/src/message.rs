@@ -71,8 +71,15 @@ pub enum Message {
     AgentDone,
     /// Runtime produced a user-visible informational message
     Notice(String),
+    /// Runtime listed models available to the current provider/auth
+    ModelsListed {
+        current_model: String,
+        models: Vec<String>,
+    },
     /// Runtime listed providers from the auth store
     ProvidersListed(Vec<String>),
+    /// Runtime switched to a new model
+    ModelChanged(String),
     /// Runtime completed a login request
     LoginComplete {
         account_id: String,

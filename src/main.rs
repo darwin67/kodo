@@ -69,6 +69,7 @@ enum AgentRequest {
     ProcessMessage(String),
     ClearConversation,
     SetModel(String),
+    ListModels,
     ListProviders,
     LogoutProvider(String),
     Quit,
@@ -137,7 +138,33 @@ async fn main() -> Result<()> {
                     agent.clear_conversation();
                 }
                 AgentRequest::SetModel(model) => {
-                    agent.set_model(model);
+                    match agent.list_models().await {
+                        Ok(models) => {
+                            if models.iter().any(|candidate| candidate.id == model) {
+                                agent.set_model(model.clone());
+                                let _ = agent_event_tx.send(AgentEvent::ModelChanged(model));
+                            } else {
+                                let _ = agent_event_tx.send(AgentEvent::Error(format!(
+                                    "Model `{model}` is not available for provider `{}` with the current credentials.",
+                                    agent.provider_name()
+                                )));
+                            }
+                        }
+                        Err(error) => {
+                            let _ = agent_event_tx.send(AgentEvent::Error(format!("{error:#}")));
+                        }
+                    }
+                }
+                AgentRequest::ListModels => match agent.list_models().await {
+                    Ok(models) => {
+                        let _ = agent_event_tx.send(AgentEvent::ModelsListed {
+                            current_model: agent.model().to_string(),
+                            models: models.into_iter().map(|model| model.id).collect(),
+                        });
+                    }
+                    Err(error) => {
+                        let _ = agent_event_tx.send(AgentEvent::Error(format!("{error:#}")));
+                    }
                 }
                 AgentRequest::ListProviders => match load_configured_providers().await {
                     Ok(providers) => {
@@ -249,6 +276,9 @@ async fn execute_command(
         Command::SetModel(model) => {
             let _ = req_tx.send(AgentRequest::SetModel(model));
         }
+        Command::ListModels => {
+            let _ = req_tx.send(AgentRequest::ListModels);
+        }
         Command::ListProviders => {
             let _ = req_tx.send(AgentRequest::ListProviders);
         }
@@ -304,7 +334,15 @@ fn map_agent_event(event: AgentEvent) -> Message {
         AgentEvent::Diagnostics { summary, count } => Message::AgentDiagnostics { summary, count },
         AgentEvent::Error(error) => Message::AgentError(error),
         AgentEvent::Notice(message) => Message::Notice(message),
+        AgentEvent::ModelsListed {
+            current_model,
+            models,
+        } => Message::ModelsListed {
+            current_model,
+            models,
+        },
         AgentEvent::ProvidersListed(providers) => Message::ProvidersListed(providers),
+        AgentEvent::ModelChanged(model_id) => Message::ModelChanged(model_id),
         AgentEvent::LoginComplete { account_id, name } => {
             Message::LoginComplete { account_id, name }
         }
