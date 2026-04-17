@@ -621,5 +621,4 @@ mod tests {
         assert_eq!(metadata.chatgpt_user_id.as_deref(), Some("user-123"));
         assert_eq!(metadata.chatgpt_account_id.as_deref(), Some("acct-456"));
     }
-
 }

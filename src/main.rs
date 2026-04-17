@@ -518,7 +518,9 @@ async fn login_openai_provider(agent_tx: &mpsc::UnboundedSender<AgentEvent>) -> 
         &tokens.access_token,
         tokens.refresh_token.as_deref(),
         expires_at.as_deref(),
-        metadata.as_ref().and_then(|meta| meta.chatgpt_account_id.as_deref()),
+        metadata
+            .as_ref()
+            .and_then(|meta| meta.chatgpt_account_id.as_deref()),
     )
     .await?;
 
@@ -544,7 +546,9 @@ async fn login_openai_provider_silent() -> Result<String> {
         &tokens.access_token,
         tokens.refresh_token.as_deref(),
         expires_at.as_deref(),
-        metadata.as_ref().and_then(|meta| meta.chatgpt_account_id.as_deref()),
+        metadata
+            .as_ref()
+            .and_then(|meta| meta.chatgpt_account_id.as_deref()),
     )
     .await?;
 

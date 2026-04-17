@@ -211,7 +211,10 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
             vec![Command::None]
         }
 
-        Message::ProviderChanged { provider, model: model_id } => {
+        Message::ProviderChanged {
+            provider,
+            model: model_id,
+        } => {
             model.provider = provider.clone();
             model.model_name = model_id.clone();
             push_system_message(
@@ -645,7 +648,14 @@ mod tests {
         let commands = update(&mut model, Message::SlashExecute);
 
         assert!(matches!(commands.as_slice(), [Command::ListModels]));
-        assert!(model.messages.last().unwrap().content.contains("Loading available models"));
+        assert!(
+            model
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Loading available models")
+        );
     }
 
     #[test]

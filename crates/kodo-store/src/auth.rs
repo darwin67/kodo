@@ -503,8 +503,8 @@ mod tests {
             Some(&expires_at),
             None,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         let token = refresh_if_needed(&pool, &s, "openai").await.unwrap();
         assert!(token.is_none());

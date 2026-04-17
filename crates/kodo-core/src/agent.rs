@@ -79,10 +79,7 @@ pub enum AgentEvent {
     /// The active model was switched successfully.
     ModelChanged(String),
     /// The active provider was switched successfully.
-    ProviderChanged {
-        provider: String,
-        model: String,
-    },
+    ProviderChanged { provider: String, model: String },
     /// A login request completed.
     LoginComplete {
         account_id: String,

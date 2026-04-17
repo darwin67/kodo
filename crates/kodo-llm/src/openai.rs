@@ -424,9 +424,7 @@ impl OpenAiProvider {
             });
         }
 
-        bail!(
-            "OpenAI credentials not configured. Set OPENAI_API_KEY or run /login openai."
-        );
+        bail!("OpenAI credentials not configured. Set OPENAI_API_KEY or run /login openai.");
     }
 
     fn build_api_request(&self, request: &CompletionRequest, stream: bool) -> ApiRequest {
@@ -994,11 +992,9 @@ mod tests {
 
     #[test]
     fn apply_auth_headers_includes_chatgpt_account_header_when_present() {
-        let provider = OpenAiProvider::with_chatgpt_auth(
-            "oauth-access".into(),
-            Some("acct-123".into()),
-        )
-        .with_base_url("http://localhost:11434/v1".into());
+        let provider =
+            OpenAiProvider::with_chatgpt_auth("oauth-access".into(), Some("acct-123".into()))
+                .with_base_url("http://localhost:11434/v1".into());
         let auth = ResolvedOpenAiAuth {
             bearer_token: "oauth-access".into(),
             account_id: Some("acct-123".into()),
