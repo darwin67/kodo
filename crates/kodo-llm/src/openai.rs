@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use async_trait::async_trait;
@@ -12,8 +13,12 @@ use crate::types::{
     CompletionRequest, CompletionResponse, ContentBlock, Message, ModelInfo, Role, StopReason,
     StreamEvent, ToolCallingSupport, ToolDefinition, Usage,
 };
+use kodo_store::auth;
+use kodo_store::crypto::KeychainStore;
+use kodo_store::db;
 
 const DEFAULT_API_BASE: &str = "https://api.openai.com/v1";
+const MODELS_LIST_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ---------------------------------------------------------------------------
 // OpenAI API request/response types (private)
@@ -81,6 +86,16 @@ struct ApiResponse {
     choices: Vec<ApiChoice>,
     #[serde(default)]
     usage: Option<ApiUsage>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ApiModelsResponse {
+    data: Vec<ApiModel>,
+}
+
+#[derive(Deserialize, Debug)]
+struct ApiModel {
+    id: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -275,6 +290,49 @@ fn parse_stop_reason(reason: Option<&str>) -> StopReason {
     }
 }
 
+fn is_coding_model_id(model_id: &str) -> bool {
+    let model_id = model_id.to_ascii_lowercase();
+    let matches_coding_family = ["gpt-5", "gpt-4.1", "gpt-4o", "o3", "o4", "codex"]
+        .iter()
+        .any(|prefix| model_id.starts_with(prefix));
+    let is_non_coding_variant = [
+        "audio",
+        "image",
+        "realtime",
+        "search",
+        "deep-research",
+        "moderation",
+        "embedding",
+        "transcribe",
+        "transcription",
+        "tts",
+        "omni-moderation",
+        "whisper",
+    ]
+    .iter()
+    .any(|needle| model_id.contains(needle));
+
+    matches_coding_family && !is_non_coding_variant
+}
+
+fn parse_coding_models_response(body: &str) -> Result<Vec<ModelInfo>> {
+    let mut models: Vec<ModelInfo> = serde_json::from_str::<ApiModelsResponse>(body)
+        .context("failed to parse OpenAI models response")?
+        .data
+        .into_iter()
+        .filter(|model| is_coding_model_id(&model.id))
+        .map(|model| ModelInfo {
+            name: model.id.clone(),
+            id: model.id,
+            context_window: 0,
+        })
+        .collect();
+
+    models.sort_by(|left, right| left.id.cmp(&right.id));
+    models.dedup_by(|left, right| left.id == right.id);
+    Ok(models)
+}
+
 // ---------------------------------------------------------------------------
 // OpenAI Provider
 // ---------------------------------------------------------------------------
@@ -283,7 +341,14 @@ fn parse_stop_reason(reason: Option<&str>) -> StopReason {
 pub struct OpenAiProvider {
     client: Client,
     api_key: String,
+    account_id: Option<String>,
     api_base: String,
+    allow_stored_auth: bool,
+}
+
+struct ResolvedOpenAiAuth {
+    bearer_token: String,
+    account_id: Option<String>,
 }
 
 impl OpenAiProvider {
@@ -292,7 +357,20 @@ impl OpenAiProvider {
         Self {
             client: Client::new(),
             api_key,
+            account_id: None,
             api_base: DEFAULT_API_BASE.to_string(),
+            allow_stored_auth: false,
+        }
+    }
+
+    /// Create a provider configured for ChatGPT OAuth bearer auth.
+    pub fn with_chatgpt_auth(access_token: String, account_id: Option<String>) -> Self {
+        Self {
+            client: Client::new(),
+            api_key: access_token,
+            account_id,
+            api_base: DEFAULT_API_BASE.to_string(),
+            allow_stored_auth: false,
         }
     }
 
@@ -310,7 +388,9 @@ impl OpenAiProvider {
         Ok(Self {
             client: Client::new(),
             api_key,
+            account_id: None,
             api_base,
+            allow_stored_auth: false,
         })
     }
 
@@ -320,17 +400,31 @@ impl OpenAiProvider {
         Self {
             client: Client::new(),
             api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+            account_id: None,
             api_base,
+            allow_stored_auth: true,
         }
     }
 
-    fn ensure_api_key(&self) -> Result<()> {
-        if self.api_key.trim().is_empty() {
-            bail!(
-                "OpenAI API key not configured. Set OPENAI_API_KEY or start with --provider ollama"
-            );
+    async fn resolve_auth(&self) -> Result<ResolvedOpenAiAuth> {
+        if !self.api_key.trim().is_empty() {
+            return Ok(ResolvedOpenAiAuth {
+                bearer_token: self.api_key.clone(),
+                account_id: self.account_id.clone(),
+            });
         }
-        Ok(())
+
+        if self.allow_stored_auth {
+            let pool = db::open(&db::default_db_path()).await?;
+            let store = KeychainStore;
+            let token = auth::resolve_auth(&pool, &store, "openai").await?;
+            return Ok(ResolvedOpenAiAuth {
+                bearer_token: token.token,
+                account_id: token.account_id,
+            });
+        }
+
+        bail!("OpenAI credentials not configured. Set OPENAI_API_KEY or run /login openai.");
     }
 
     fn build_api_request(&self, request: &CompletionRequest, stream: bool) -> ApiRequest {
@@ -349,19 +443,34 @@ impl OpenAiProvider {
             },
         }
     }
+
+    fn apply_auth_headers(
+        &self,
+        request: reqwest::RequestBuilder,
+        auth: &ResolvedOpenAiAuth,
+    ) -> reqwest::RequestBuilder {
+        let request = request.header("Authorization", format!("Bearer {}", auth.bearer_token));
+        if let Some(account_id) = auth.account_id.as_deref() {
+            request.header("ChatGPT-Account-ID", account_id)
+        } else {
+            request
+        }
+    }
 }
 
 #[async_trait]
 impl Provider for OpenAiProvider {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse> {
-        self.ensure_api_key()?;
+        let auth = self.resolve_auth().await?;
         let api_req = self.build_api_request(&request, false);
 
         let resp = self
-            .client
-            .post(format!("{}/chat/completions", self.api_base))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
+            .apply_auth_headers(
+                self.client
+                    .post(format!("{}/chat/completions", self.api_base))
+                    .header("Content-Type", "application/json"),
+                &auth,
+            )
             .json(&api_req)
             .send()
             .await
@@ -417,14 +526,16 @@ impl Provider for OpenAiProvider {
         &self,
         request: CompletionRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>> {
-        self.ensure_api_key()?;
+        let auth = self.resolve_auth().await?;
         let api_req = self.build_api_request(&request, true);
 
         let resp = self
-            .client
-            .post(format!("{}/chat/completions", self.api_base))
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
+            .apply_auth_headers(
+                self.client
+                    .post(format!("{}/chat/completions", self.api_base))
+                    .header("Content-Type", "application/json"),
+                &auth,
+            )
             .json(&api_req)
             .send()
             .await
@@ -572,23 +683,26 @@ impl Provider for OpenAiProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        Ok(vec![
-            ModelInfo {
-                id: "gpt-4o".into(),
-                name: "GPT-4o".into(),
-                context_window: 128_000,
-            },
-            ModelInfo {
-                id: "gpt-4o-mini".into(),
-                name: "GPT-4o Mini".into(),
-                context_window: 128_000,
-            },
-            ModelInfo {
-                id: "o3-mini".into(),
-                name: "o3-mini".into(),
-                context_window: 200_000,
-            },
-        ])
+        let auth = self.resolve_auth().await?;
+        let response = self
+            .apply_auth_headers(self.client.get(format!("{}/models", self.api_base)), &auth)
+            .timeout(MODELS_LIST_TIMEOUT)
+            .send()
+            .await
+            .context("failed to list OpenAI models")?;
+
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            bail!("OpenAI models API error ({}): {}", status, body);
+        }
+
+        let models = parse_coding_models_response(&body)?;
+        if models.is_empty() {
+            bail!("No coding-capable OpenAI models were returned for the current credentials.");
+        }
+
+        Ok(models)
     }
 }
 
@@ -816,12 +930,30 @@ mod tests {
         assert_eq!(provider.tool_calling_support(), ToolCallingSupport::Native);
     }
 
-    #[tokio::test]
-    async fn provider_list_models() {
-        let provider = OpenAiProvider::new("key".into());
-        let models = provider.list_models().await.unwrap();
-        assert!(!models.is_empty());
-        assert!(models.iter().any(|m| m.id.contains("gpt-4o")));
+    #[test]
+    fn parse_coding_models_response_filters_non_coding_models() {
+        let body = r#"{
+            "data": [
+                {"id": "gpt-5"},
+                {"id": "gpt-4.1-mini"},
+                {"id": "o4-mini"},
+                {"id": "gpt-image-1"},
+                {"id": "gpt-4o-realtime-preview"},
+                {"id": "text-embedding-3-large"}
+            ]
+        }"#;
+
+        let models = parse_coding_models_response(body).unwrap();
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, vec!["gpt-4.1-mini", "gpt-5", "o4-mini"]);
+    }
+
+    #[test]
+    fn coding_model_filter_rejects_non_coding_variants() {
+        assert!(is_coding_model_id("gpt-5"));
+        assert!(is_coding_model_id("codex-mini-latest"));
+        assert!(!is_coding_model_id("gpt-image-1"));
+        assert!(!is_coding_model_id("gpt-4o-realtime-preview"));
     }
 
     #[test]
@@ -844,7 +976,7 @@ mod tests {
 
         let provider = OpenAiProvider::from_env_or_empty();
         assert!(provider.api_key.is_empty());
-        assert!(provider.ensure_api_key().is_err());
+        assert!(provider.allow_stored_auth);
 
         if let Some(key) = original {
             unsafe { std::env::set_var("OPENAI_API_KEY", key) };
@@ -856,5 +988,35 @@ mod tests {
         let provider =
             OpenAiProvider::new("key".into()).with_base_url("http://localhost:11434/v1".into());
         assert_eq!(provider.api_base, "http://localhost:11434/v1");
+    }
+
+    #[test]
+    fn apply_auth_headers_includes_chatgpt_account_header_when_present() {
+        let provider =
+            OpenAiProvider::with_chatgpt_auth("oauth-access".into(), Some("acct-123".into()))
+                .with_base_url("http://localhost:11434/v1".into());
+        let auth = ResolvedOpenAiAuth {
+            bearer_token: "oauth-access".into(),
+            account_id: Some("acct-123".into()),
+        };
+        let request = provider
+            .apply_auth_headers(provider.client.post("http://localhost/test"), &auth)
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request
+                .headers()
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer oauth-access")
+        );
+        assert_eq!(
+            request
+                .headers()
+                .get("chatgpt-account-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("acct-123")
+        );
     }
 }

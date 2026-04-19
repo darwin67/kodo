@@ -9,12 +9,15 @@ use tokio::sync::mpsc;
 use kodo_core::agent::{Agent, AgentEvent};
 use kodo_llm::anthropic::AnthropicProvider;
 use kodo_llm::gemini::GeminiProvider;
+use kodo_llm::models::available_models;
 use kodo_llm::ollama::OllamaProvider;
 use kodo_llm::openai::OpenAiProvider;
 use kodo_llm::provider::Provider;
+use kodo_llm::types::ModelInfo;
 use kodo_store::auth;
 use kodo_store::crypto::KeychainStore;
 use kodo_store::db;
+use kodo_store::oauth::ProviderOAuthConfig;
 use kodo_ui::command::Command;
 use kodo_ui::event::{EventHandler, map_event};
 use kodo_ui::message::Message;
@@ -61,13 +64,37 @@ fn default_model(provider_name: &str) -> &str {
     }
 }
 
+fn fallback_models(provider_name: &str) -> Vec<ModelInfo> {
+    available_models(provider_name)
+        .iter()
+        .map(|model| ModelInfo {
+            id: model.id.to_string(),
+            name: model.display_name.to_string(),
+            context_window: model.context_k * 1024,
+        })
+        .collect()
+}
+
+fn should_fallback_model_listing(provider_name: &str, error: &anyhow::Error) -> bool {
+    if provider_name != "openai" {
+        return false;
+    }
+
+    let message = format!("{error:#}").to_ascii_lowercase();
+    message.contains("timed out")
+        || message.contains("deadline has elapsed")
+        || message.contains("operation timed out")
+}
+
 /// Messages sent from the TUI event loop to the agent task.
 /// Agent communication types
 #[derive(Debug)]
 enum AgentRequest {
     ProcessMessage(String),
     ClearConversation,
+    SetProvider(String),
     SetModel(String),
+    ListModels,
     ListProviders,
     LogoutProvider(String),
     Quit,
@@ -135,8 +162,73 @@ async fn main() -> Result<()> {
                 AgentRequest::ClearConversation => {
                     agent.clear_conversation();
                 }
+                AgentRequest::SetProvider(provider_name) => match create_provider(&provider_name) {
+                    Ok(provider) => {
+                        let model_name = default_model(&provider_name).to_string();
+                        agent.set_provider(provider);
+                        agent.set_model(model_name.clone());
+                        let _ = agent_event_tx.send(AgentEvent::ProviderChanged {
+                            provider: provider_name,
+                            model: model_name,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = agent_event_tx.send(AgentEvent::Error(format!("{error:#}")));
+                    }
+                },
                 AgentRequest::SetModel(model) => {
-                    agent.set_model(model);
+                    let provider_name = agent.provider_name().to_string();
+                    let models = match agent.list_models().await {
+                        Ok(models) => models,
+                        Err(error) if should_fallback_model_listing(&provider_name, &error) => {
+                            let _ = agent_event_tx.send(AgentEvent::Notice(
+                                "OpenAI model lookup timed out after 15 seconds. Using the built-in coding model list; token verification will happen when you send a prompt."
+                                    .to_string(),
+                            ));
+                            fallback_models(&provider_name)
+                        }
+                        Err(error) => {
+                            let _ = agent_event_tx.send(AgentEvent::Error(format!("{error:#}")));
+                            continue;
+                        }
+                    };
+
+                    if models.iter().any(|candidate| candidate.id == model) {
+                        agent.set_model(model.clone());
+                        let _ = agent_event_tx.send(AgentEvent::ModelChanged(model));
+                    } else {
+                        let _ = agent_event_tx.send(AgentEvent::Error(format!(
+                            "Model `{model}` is not available for provider `{}` with the current credentials.",
+                            agent.provider_name()
+                        )));
+                    }
+                }
+                AgentRequest::ListModels => {
+                    let provider_name = agent.provider_name().to_string();
+                    match agent.list_models().await {
+                        Ok(models) => {
+                            let _ = agent_event_tx.send(AgentEvent::ModelsListed {
+                                current_model: agent.model().to_string(),
+                                models: models.into_iter().map(|model| model.id).collect(),
+                            });
+                        }
+                        Err(error) if should_fallback_model_listing(&provider_name, &error) => {
+                            let _ = agent_event_tx.send(AgentEvent::Notice(
+                                "OpenAI model lookup timed out after 15 seconds. Showing the built-in coding model list instead; token verification will happen when you send a prompt."
+                                    .to_string(),
+                            ));
+                            let _ = agent_event_tx.send(AgentEvent::ModelsListed {
+                                current_model: agent.model().to_string(),
+                                models: fallback_models(&provider_name)
+                                    .into_iter()
+                                    .map(|model| model.id)
+                                    .collect(),
+                            });
+                        }
+                        Err(error) => {
+                            let _ = agent_event_tx.send(AgentEvent::Error(format!("{error:#}")));
+                        }
+                    }
                 }
                 AgentRequest::ListProviders => match load_configured_providers().await {
                     Ok(providers) => {
@@ -245,14 +337,22 @@ async fn execute_command(
         Command::ClearConversation => {
             let _ = req_tx.send(AgentRequest::ClearConversation);
         }
+        Command::SetProvider(provider) => {
+            let _ = req_tx.send(AgentRequest::SetProvider(provider));
+        }
         Command::SetModel(model) => {
             let _ = req_tx.send(AgentRequest::SetModel(model));
+        }
+        Command::ListModels => {
+            let _ = req_tx.send(AgentRequest::ListModels);
         }
         Command::ListProviders => {
             let _ = req_tx.send(AgentRequest::ListProviders);
         }
         Command::LoginProvider { provider, name } => {
-            if let Err(error) =
+            if provider == "openai" {
+                start_openai_login(agent_tx.clone(), name);
+            } else if let Err(error) =
                 handle_login_command(terminal, events, agent_tx, &provider, name.clone()).await
             {
                 let _ = agent_tx.send(AgentEvent::Error(format!("{error:#}")));
@@ -270,6 +370,22 @@ async fn execute_command(
     }
 }
 
+fn start_openai_login(agent_tx: mpsc::UnboundedSender<AgentEvent>, name: Option<String>) {
+    let _ = agent_tx.send(AgentEvent::Notice(
+        "Starting OpenAI login. Finish the OAuth flow in your browser.".to_string(),
+    ));
+    tokio::spawn(async move {
+        match login_openai_provider(&agent_tx).await {
+            Ok(account_id) => {
+                let _ = agent_tx.send(AgentEvent::LoginComplete { account_id, name });
+            }
+            Err(error) => {
+                let _ = agent_tx.send(AgentEvent::Error(format!("{error:#}")));
+            }
+        }
+    });
+}
+
 /// Map AgentEvent to application Message.
 /// This converts external agent events into internal application messages
 /// that can be processed by the pure update() function.
@@ -285,7 +401,18 @@ fn map_agent_event(event: AgentEvent) -> Message {
         AgentEvent::Diagnostics { summary, count } => Message::AgentDiagnostics { summary, count },
         AgentEvent::Error(error) => Message::AgentError(error),
         AgentEvent::Notice(message) => Message::Notice(message),
+        AgentEvent::ModelsListed {
+            current_model,
+            models,
+        } => Message::ModelsListed {
+            current_model,
+            models,
+        },
         AgentEvent::ProvidersListed(providers) => Message::ProvidersListed(providers),
+        AgentEvent::ModelChanged(model_id) => Message::ModelChanged(model_id),
+        AgentEvent::ProviderChanged { provider, model } => {
+            Message::ProviderChanged { provider, model }
+        }
         AgentEvent::LoginComplete { account_id, name } => {
             Message::LoginComplete { account_id, name }
         }
@@ -330,25 +457,104 @@ async fn handle_login_command(
 }
 
 async fn login_provider(provider: &str) -> Result<String> {
-    let prompt = match provider {
-        "anthropic" => "Anthropic API key: ",
-        "openai" => "OpenAI API key or access token: ",
-        "gemini" => "Gemini API key: ",
+    let pool = db::open(&db::default_db_path()).await?;
+    let store = KeychainStore;
+
+    match provider {
+        "openai" => {
+            return login_openai_provider_silent().await;
+        }
+        "anthropic" | "gemini" => {
+            let prompt = match provider {
+                "anthropic" => "Anthropic API key: ",
+                "gemini" => "Gemini API key: ",
+                _ => unreachable!(),
+            };
+
+            eprintln!("Logging in to `{provider}`. Credentials are stored in the OS keychain.");
+            let secret = prompt_password(prompt)?;
+            let secret = secret.trim().to_string();
+            if secret.is_empty() {
+                bail!("No credential entered.");
+            }
+
+            auth::save_token(&pool, &store, provider, &secret, None, None, None).await?;
+        }
         "ollama" => bail!("`ollama` does not require login."),
         other => bail!(
             "Unknown provider `{other}`. Available providers: anthropic, openai, gemini, ollama."
         ),
-    };
-
-    eprintln!("Logging in to `{provider}`. Credentials are stored in the OS keychain.");
-    let secret = prompt_password(prompt)?;
-    let secret = secret.trim().to_string();
-    if secret.is_empty() {
-        bail!("No credential entered.");
     }
 
+    Ok(provider.to_string())
+}
+
+async fn login_openai_provider(agent_tx: &mpsc::UnboundedSender<AgentEvent>) -> Result<String> {
     let pool = db::open(&db::default_db_path()).await?;
     let store = KeychainStore;
-    auth::save_token(&pool, &store, provider, &secret, None, None).await?;
-    Ok(provider.to_string())
+    let tx = agent_tx.clone();
+    let tokens = kodo_store::oauth::run_openai_oauth_flow_with_notifier(
+        &ProviderOAuthConfig::openai_default(),
+        Box::new(move |notice| {
+            let _ = tx.send(AgentEvent::Notice(notice));
+        }),
+    )
+    .await?;
+
+    let metadata = tokens
+        .id_token
+        .as_deref()
+        .map(kodo_store::oauth::parse_openai_id_token_metadata)
+        .transpose()?;
+    let _ = agent_tx.send(AgentEvent::Notice(
+        "OpenAI OAuth tokens received. Saving credentials to the OS keychain...".to_string(),
+    ));
+
+    let expires_at = tokens.expires_in.map(format_oauth_expiry);
+    auth::save_token(
+        &pool,
+        &store,
+        "openai",
+        &tokens.access_token,
+        tokens.refresh_token.as_deref(),
+        expires_at.as_deref(),
+        metadata
+            .as_ref()
+            .and_then(|meta| meta.chatgpt_account_id.as_deref()),
+    )
+    .await?;
+
+    Ok("openai".to_string())
+}
+
+async fn login_openai_provider_silent() -> Result<String> {
+    let pool = db::open(&db::default_db_path()).await?;
+    let store = KeychainStore;
+    let tokens =
+        kodo_store::oauth::run_openai_oauth_flow(&ProviderOAuthConfig::openai_default()).await?;
+    let metadata = tokens
+        .id_token
+        .as_deref()
+        .map(kodo_store::oauth::parse_openai_id_token_metadata)
+        .transpose()?;
+
+    let expires_at = tokens.expires_in.map(format_oauth_expiry);
+    auth::save_token(
+        &pool,
+        &store,
+        "openai",
+        &tokens.access_token,
+        tokens.refresh_token.as_deref(),
+        expires_at.as_deref(),
+        metadata
+            .as_ref()
+            .and_then(|meta| meta.chatgpt_account_id.as_deref()),
+    )
+    .await?;
+
+    Ok("openai".to_string())
+}
+
+fn format_oauth_expiry(expires_in: i64) -> String {
+    (chrono::Utc::now() + chrono::Duration::seconds(expires_in)).to_rfc3339()
 }

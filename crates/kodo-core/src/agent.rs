@@ -11,7 +11,8 @@ use kodo_fmt::registry::FormatterRegistry;
 use kodo_fmt::runner::format_file;
 use kodo_llm::provider::Provider;
 use kodo_llm::types::{
-    CompletionRequest, ContentBlock, Message, Role, StopReason, StreamEvent, ToolDefinition,
+    CompletionRequest, ContentBlock, Message, ModelInfo, Role, StopReason, StreamEvent,
+    ToolDefinition,
 };
 use kodo_lsp::diagnostics;
 use kodo_lsp::manager::LspManager;
@@ -68,8 +69,17 @@ pub enum AgentEvent {
     Error(String),
     /// A user-visible informational message.
     Notice(String),
+    /// Provider-backed list of models available to the current auth context.
+    ModelsListed {
+        current_model: String,
+        models: Vec<String>,
+    },
     /// Stored providers were listed from the auth store.
     ProvidersListed(Vec<String>),
+    /// The active model was switched successfully.
+    ModelChanged(String),
+    /// The active provider was switched successfully.
+    ProviderChanged { provider: String, model: String },
     /// A login request completed.
     LoginComplete {
         account_id: String,
@@ -154,6 +164,10 @@ impl Agent {
 
     pub fn provider_name(&self) -> &str {
         self.provider.name()
+    }
+
+    pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        self.provider.list_models().await
     }
 
     pub fn set_provider(&mut self, provider: Arc<dyn Provider>) {

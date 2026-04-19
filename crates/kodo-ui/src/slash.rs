@@ -60,6 +60,7 @@ pub fn builtin_commands() -> Vec<SlashCommand> {
         ("clear", "", "Clear conversation history"),
         ("compact", "", "Summarise context and replace messages"),
         ("debug", "[on|off]", "Toggle in-chat debug logging"),
+        ("provider", "[name]", "Show or switch the active provider"),
         ("model", "[id]", "Show current model, or switch to id"),
         ("providers", "", "List all connected accounts"),
         ("login", "<provider> [name]", "Add a new account"),
@@ -182,7 +183,7 @@ mod tests {
 
     #[test]
     fn commands_contains_all_builtins() {
-        assert_eq!(builtin_commands().len(), 8);
+        assert_eq!(builtin_commands().len(), 9);
     }
 
     #[test]
@@ -255,6 +256,14 @@ mod tests {
         assert_eq!(parsed.name, "model");
         assert_eq!(parsed.args, vec!["gpt-4o"]);
         assert_eq!(parsed.args_raw, "gpt-4o");
+    }
+
+    #[test]
+    fn parse_provider_command() {
+        let parsed = parse("/provider openai");
+        assert_eq!(parsed.name, "provider");
+        assert_eq!(parsed.args, vec!["openai"]);
+        assert_eq!(parsed.args_raw, "openai");
     }
 
     #[test]

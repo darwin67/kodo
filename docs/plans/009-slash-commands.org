@@ -8,8 +8,9 @@
 
 Provider and model management currently has no in-app interface — users must
 restart with CLI flags. A slash command system (like Claude Code's ~/model~,
-~/clear~, etc.) lets users manage accounts, switch models, and control the
-session without leaving the input prompt.
+~/clear~, etc.) lets users manage accounts, discover credential-usable coding
+models, switch models, and control the session without leaving the input
+prompt.
 
 * Scope
 
@@ -25,10 +26,15 @@ Built-in commands:
 | ~/help~                    | Print all available commands                |
 | ~/clear~                   | Clear conversation history                  |
 | ~/compact~                 | Summarise context and replace messages      |
-| ~/model [id]~              | Show current model, or switch to ~id~       |
+| ~/model [id]~              | List current credential-usable models, show current selection, or switch to ~id~ |
 | ~/providers~               | List all connected accounts                 |
 | ~/login <provider> [name]~ | Add a new account (OAuth or API key prompt) |
 | ~/logout <account_id>~     | Remove an account from keychain + DB        |
+
+Credential verification requirement:
+- After login, users should be able to use slash commands to list the models
+  available for coding with the current credentials and select one for simple
+  prompt tests.
 
 * Current State
 
@@ -76,6 +82,11 @@ Export from ~kodo-llm/src/lib.rs~.
 - [X] ~available_models("gemini")~ returns at least 3 entries
 - [X] ~available_models("unknown")~ returns empty slice (no panic)
 - [X] ~cargo build -p kodo-llm~ succeeds
+
+*Finding*: a static registry is not sufficient for auth verification by itself.
+The slash flow also needs a provider/runtime-backed filter so ~/model~ only
+shows models that are valid for the current provider/auth combination and can
+be used immediately for testing.
 
 ** DONE Step 3: Command registry
 
@@ -176,8 +187,10 @@ Add to ~Msg~:
      - ~"help"~ → append help text to messages
      - ~"clear"~ → clear ~model.messages~
      - ~"compact"~ → dispatch ~AppCmd::CompactContext~
-     - ~"model"~ with arg → dispatch ~AppCmd::SetModel(id)~; without arg →
-       append current model info to messages
+     - ~"model"~ without arg → append current model plus the models available
+       to the active credentials
+     - ~"model"~ with arg → validate against the currently available models,
+       then dispatch ~AppCmd::SetModel(id)~
      - ~"providers"~ → dispatch ~AppCmd::ListProviders~; result arrives as
        ~Msg::ProvidersListed(accounts)~ → append formatted list to messages
      - ~"login"~ → dispatch ~AppCmd::LoginProvider { provider, name }~; result
@@ -195,8 +208,10 @@ Also intercept Enter key in ~update.rs~: if ~slash_state.is_some()~, dispatch
 - [X] ~SlashExecute~ clears input before dispatching
 - [X] ~/help~ appends formatted command list to messages
 - [X] ~/clear~ clears message history
-- [X] ~/model~ without arg appends current model to messages
-- [X] ~/model gpt-4o~ dispatches ~SetModel~
+- [ ] ~/model~ without arg appends current model and the models available to
+      the active credentials
+- [ ] ~/model gpt-4o~ only dispatches ~SetModel~ when ~gpt-4o~ is available to
+      the active credentials
 - [X] ~/providers~ dispatches ~ListProviders~ and formats result
 - [X] ~/login openai~ dispatches ~LoginProvider~
 - [X] ~/logout <id>~ dispatches ~LogoutProvider~
@@ -254,12 +269,39 @@ Follows the same visual style as the existing command palette.
 - [X] ~cargo clippy --workspace~ no warnings
 - [X] ~/help~ lists all 7 commands
 - [X] ~/clear~ empties the chat
-- [X] ~/model~ shows current model; ~/model gpt-4o~ switches it
+- [ ] ~/model~ lists the coding-capable models available to the active
+      credentials and shows the current selection
+- [ ] ~/model gpt-4o~ switches only when ~gpt-4o~ is available to the active
+      credentials
+- [ ] After selecting a model, a trivial prompt can be sent to verify the
+      chosen model works with the current credentials
 - [X] ~/providers~ lists connected accounts
 - [X] ~/login anthropic MyKey~ adds an account
 - [X] ~/logout <id>~ removes the account
 - [X] Tab/Shift+Tab navigate completions
 - [X] Escape cancels without submitting
+
+** TODO Step 10b: Credential-aware model verification
+
+*What*: Make ~/model~ useful as a post-login verification tool rather than just
+a static config switch.
+
+*Scope*:
+- Add a runtime path that resolves the active provider/auth and lists the
+  models available for coding with those credentials.
+- Surface that list through ~/model~ without arguments.
+- Require ~/model <id>~ to validate against the currently available models
+  before switching.
+- After selection, keep the model active so a simple prompt can verify the
+  credentials and model routing end-to-end.
+
+*Checklist*:
+- [ ] Runtime can fetch or otherwise resolve the credential-usable model list
+      for the active provider
+- [ ] ~/model~ without args shows the current selection and available models
+- [ ] ~/model <id>~ rejects models unavailable to the current credentials
+- [ ] Selected model persists for subsequent prompt tests
+- [ ] ~cargo build~ succeeds
 
 * Skill Customisation
 

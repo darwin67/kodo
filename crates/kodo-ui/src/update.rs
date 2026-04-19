@@ -4,7 +4,6 @@ use crate::model::{ChatMessage, ChatRole, Model};
 use crate::skills;
 use crate::slash::{self, CommandSource};
 use crate::theme::Theme;
-use kodo_llm::models::available_models;
 
 /// The core update function following the Elm Architecture.
 pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
@@ -172,6 +171,26 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
             vec![Command::None]
         }
 
+        Message::ModelsListed {
+            current_model,
+            models,
+        } => {
+            let mut content = format!(
+                "Current model: `{}` / `{}`.\nAvailable coding models:",
+                model.provider, current_model
+            );
+            if models.is_empty() {
+                content.push_str("\n- none");
+            } else {
+                for model_id in models {
+                    content.push_str(&format!("\n- `{model_id}`"));
+                }
+            }
+            content.push_str("\nUse `/model <id>` to switch.");
+            push_system_message(model, content);
+            vec![Command::None]
+        }
+
         Message::ProvidersListed(providers) => {
             if providers.is_empty() {
                 push_system_message(model, "No connected providers found.".to_string());
@@ -186,11 +205,36 @@ pub fn update(model: &mut Model, message: Message) -> Vec<Command> {
             vec![Command::None]
         }
 
+        Message::ModelChanged(model_id) => {
+            model.model_name = model_id.clone();
+            push_system_message(model, format!("Switched model to `{model_id}`."));
+            vec![Command::None]
+        }
+
+        Message::ProviderChanged {
+            provider,
+            model: model_id,
+        } => {
+            model.provider = provider.clone();
+            model.model_name = model_id.clone();
+            push_system_message(
+                model,
+                format!("Switched provider to `{provider}` with model `{model_id}`."),
+            );
+            vec![Command::None]
+        }
+
         Message::LoginComplete { account_id, name } => {
             let mut message = format!("Logged in `{account_id}`.");
             if let Some(name) = name {
                 message.push_str(&format!(
                     " Account labels are not persisted yet, so `{name}` is only acknowledged for now."
+                ));
+            }
+            if account_id != model.provider {
+                message.push_str(&format!(
+                    " Active provider is still `{}`. Run `/provider {account_id}` and then `/model` to verify the login.",
+                    model.provider
                 ));
             }
             push_system_message(model, message);
@@ -374,31 +418,29 @@ fn handle_slash_execute(model: &mut Model) -> Vec<Command> {
                 push_system_message(model, format!("Debug logging {status}."));
                 vec![Command::None]
             }
-            "model" => {
-                if let Some(model_id) = parsed.args.first() {
-                    if model_is_known_for_provider(&model.provider, model_id) {
-                        model.model_name = model_id.clone();
-                        push_system_message(model, format!("Switched model to `{model_id}`."));
-                        vec![Command::SetModel(model_id.clone())]
-                    } else {
-                        push_system_message(
-                            model,
-                            format!(
-                                "Unknown model `{model_id}` for provider `{}`.",
-                                model.provider
-                            ),
-                        );
-                        vec![Command::None]
-                    }
+            "provider" => {
+                if let Some(provider) = parsed.args.first() {
+                    vec![Command::SetProvider(provider.clone())]
                 } else {
                     push_system_message(
                         model,
                         format!(
-                            "Current model: `{}` / `{}`.",
-                            model.provider, model.model_name
+                            "Current provider: `{}`. Use `/provider <name>` to switch.",
+                            model.provider
                         ),
                     );
                     vec![Command::None]
+                }
+            }
+            "model" => {
+                if let Some(model_id) = parsed.args.first() {
+                    vec![Command::SetModel(model_id.clone())]
+                } else {
+                    push_system_message(
+                        model,
+                        format!("Loading available models for `{}`...", model.provider),
+                    );
+                    vec![Command::ListModels]
                 }
             }
             "providers" => vec![Command::ListProviders],
@@ -432,12 +474,6 @@ fn handle_slash_execute(model: &mut Model) -> Vec<Command> {
 
 fn sync_slash_state(model: &mut Model) {
     model.slash_state = slash::state_for_input(&model.input, &model.commands);
-}
-
-fn model_is_known_for_provider(provider: &str, model_id: &str) -> bool {
-    available_models(provider)
-        .iter()
-        .any(|candidate| candidate.id == model_id)
 }
 
 fn push_system_message(model: &mut Model, content: String) {
@@ -601,7 +637,7 @@ mod tests {
     }
 
     #[test]
-    fn test_slash_model_without_arg_shows_current_model() {
+    fn test_slash_model_without_arg_dispatches_runtime_list() {
         let mut model = Model::new(false);
         model.provider = "openai".to_string();
         model.model_name = "gpt-4o".to_string();
@@ -609,15 +645,16 @@ mod tests {
         model.cursor_pos = model.input.len();
         model.slash_state = slash::state_for_input(&model.input, &model.commands);
 
-        update(&mut model, Message::SlashExecute);
+        let commands = update(&mut model, Message::SlashExecute);
 
+        assert!(matches!(commands.as_slice(), [Command::ListModels]));
         assert!(
             model
                 .messages
                 .last()
                 .unwrap()
                 .content
-                .contains("Current model")
+                .contains("Loading available models")
         );
     }
 
@@ -631,9 +668,71 @@ mod tests {
 
         let commands = update(&mut model, Message::SlashExecute);
 
-        assert_eq!(model.model_name, "gpt-4o-mini");
         assert_eq!(commands.len(), 1);
         assert!(matches!(&commands[0], Command::SetModel(model) if model == "gpt-4o-mini"));
+    }
+
+    #[test]
+    fn test_models_listed_message_formats_runtime_results() {
+        let mut model = Model::new(false);
+        model.provider = "openai".to_string();
+
+        update(
+            &mut model,
+            Message::ModelsListed {
+                current_model: "gpt-5".to_string(),
+                models: vec!["gpt-5".to_string(), "o4-mini".to_string()],
+            },
+        );
+
+        let content = &model.messages.last().unwrap().content;
+        assert!(content.contains("Current model: `openai` / `gpt-5`."));
+        assert!(content.contains("- `gpt-5`"));
+        assert!(content.contains("- `o4-mini`"));
+    }
+
+    #[test]
+    fn test_model_changed_updates_current_selection() {
+        let mut model = Model::new(false);
+        model.model_name = "gpt-4o".to_string();
+
+        update(&mut model, Message::ModelChanged("gpt-5".to_string()));
+
+        assert_eq!(model.model_name, "gpt-5");
+        assert!(
+            model
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Switched model to `gpt-5`.")
+        );
+    }
+
+    #[test]
+    fn test_provider_changed_updates_provider_and_model() {
+        let mut model = Model::new(false);
+        model.provider = "anthropic".to_string();
+        model.model_name = "claude-sonnet-4-20250514".to_string();
+
+        update(
+            &mut model,
+            Message::ProviderChanged {
+                provider: "openai".to_string(),
+                model: "gpt-5".to_string(),
+            },
+        );
+
+        assert_eq!(model.provider, "openai");
+        assert_eq!(model.model_name, "gpt-5");
+        assert!(
+            model
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Switched provider to `openai` with model `gpt-5`.")
+        );
     }
 
     #[test]
@@ -646,6 +745,42 @@ mod tests {
         let commands = update(&mut model, Message::SlashExecute);
 
         assert!(matches!(commands.as_slice(), [Command::ListProviders]));
+    }
+
+    #[test]
+    fn test_slash_provider_with_arg_dispatches_runtime_command() {
+        let mut model = Model::new(false);
+        model.input = "/provider openai".to_string();
+        model.cursor_pos = model.input.len();
+        model.slash_state = slash::state_for_input(&model.input, &model.commands);
+
+        let commands = update(&mut model, Message::SlashExecute);
+
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::SetProvider(provider)] if provider == "openai"
+        ));
+    }
+
+    #[test]
+    fn test_slash_provider_without_arg_shows_current_provider() {
+        let mut model = Model::new(false);
+        model.provider = "openai".to_string();
+        model.input = "/provider".to_string();
+        model.cursor_pos = model.input.len();
+        model.slash_state = slash::state_for_input(&model.input, &model.commands);
+
+        let commands = update(&mut model, Message::SlashExecute);
+
+        assert!(commands.iter().all(|command| command.is_none()));
+        assert!(
+            model
+                .messages
+                .last()
+                .unwrap()
+                .content
+                .contains("Current provider: `openai`.")
+        );
     }
 
     #[test]
